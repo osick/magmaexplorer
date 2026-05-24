@@ -16,7 +16,7 @@ LLM features (everything involving the Anthropic API) require:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-All other features — direct input, DSL derivation primitives, save/load, `/list`, `/deduction` — work without the key.
+All other features — direct input, DSL derivation primitives, save/load, `/list`, `/deduction`, `/report` — work without the key.
 
 
 ## Quickstart
@@ -258,6 +258,11 @@ Ask a second, stateless LLM call (the "critic") to review entry `[i]`'s derivati
 ```
 Export the proof subtree anchored at `[to]` (with `[from]` as a required ancestor) to `<name>.deduction`. See [/deduction Export](#deduction-export).
 
+```text
+/report <name>
+```
+Export the **entire current list** as a markdown file `<name>.md` containing a per-entry table and a mermaid diagram of the deduction DAG. See [/report Export](#report-export).
+
 
 ## Derivation DSL Spec
 
@@ -400,6 +405,53 @@ Notes:
 - For equations: the row has `statement` (pretty-printed).
 - For definitions: the row has `name` and `body` (pretty-printed).
 - `sources` and `steps` are always present (may be empty lists).
+
+
+## /report Export
+
+```text
+/report <name>
+```
+
+Writes `<name>.md`, a self-contained markdown file with **two parts**:
+
+1. A markdown **table** listing every entry — `#`, `Kind`, `Statement`, `Sources`, `Steps` (multi-line cells use `<br>`).
+2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node; an arrow `na --> nb` means `[b]` cites `[a]` as a source. Equations are rectangles (`n0["..."]`); definitions are stadiums with rounded corners (`n1(["..."])`). Standalone axioms appear as isolated nodes with no incoming edges.
+
+Special characters inside node labels (`(`, `)`, `[`, `]`, `"`) are HTML-escaped to `&#40;`, `&#41;`, `&#91;`, `&#93;`, `&quot;`. This is required because strict mermaid renderers (notably GitHub's) refuse to render labels containing raw parentheses or square brackets even inside quoted strings — without the escaping, the canvas comes up empty.
+
+Open the resulting `.md` in any mermaid-aware viewer: GitHub or GitLab (renders inline), VS Code with the *Markdown Preview Mermaid Support* extension, Obsidian, or `mmdc` / `mermaid-cli` to render to SVG/PNG.
+
+Example output (abridged) after building `[0]` axiom, `[1]` definition, `[2]` from `/sym 0`, `[3]` from `/inst 0`:
+
+````markdown
+# magmaexplorer report: myproof
+
+_4 entries_
+
+## Entries
+
+| # | Kind | Statement | Sources | Steps |
+|---|------|-----------|---------|-------|
+| [0] | equation | `x*y = y*(x*x)` | - | - |
+| [1] | definition | `p := x*x` | - | - |
+| [2] | equation | `y*(x*x) = x*y` | 0 | 1. sym [0] |
+| [3] | equation | `x*p = p*(x*x)` | 0 | 1. inst [0] y:=p |
+
+## Deduction graph
+
+```mermaid
+graph TD
+    n0["&#91;0&#93; x*y = y*&#40;x*x&#41;"]
+    n1(["&#91;1&#93; p := x*x"])
+    n2["&#91;2&#93; y*&#40;x*x&#41; = x*y"]
+    n3["&#91;3&#93; x*p = p*&#40;x*x&#41;"]
+    n0 --> n2
+    n0 --> n3
+```
+````
+
+`/report` is read-only: it does not mutate the list.
 
 
 ## JSON Save Format

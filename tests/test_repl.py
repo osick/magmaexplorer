@@ -673,6 +673,134 @@ def test_help_includes_deduction():
     assert "/deduction" in output
 
 
+# --- /report <name> writes a markdown file with table + mermaid graph ---
+
+def test_report_writes_markdown_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",
+        "p := x*x",
+        "/sym 0",                # [2] from [0]
+        "/report myreport",
+        "/quit",
+    ])
+    path = tmp_path / "myreport.md"
+    assert path.exists()
+    text = path.read_text()
+    # Title and entry count
+    assert "myreport" in text
+    # Markdown table headers
+    assert "| #" in text and "Statement" in text and "Sources" in text and "Steps" in text
+    # All three entries appear in the table
+    assert "x*y = y*x" in text
+    assert "p := x*x" in text
+    assert "y*x = x*y" in text
+
+
+def test_report_includes_mermaid_block(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",
+        "/sym 0",
+        "/report g",
+        "/quit",
+    ])
+    text = (tmp_path / "g.md").read_text()
+    assert "```mermaid" in text
+    assert "graph TD" in text
+    # n0 represents [0], n1 represents [1]; [1] derives from [0]
+    assert "n0" in text
+    assert "n1" in text
+    assert "n0 --> n1" in text
+
+
+def test_report_definition_uses_different_node_shape(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",
+        "p := x*x",
+        "/report mix",
+        "/quit",
+    ])
+    text = (tmp_path / "mix.md").read_text()
+    # Equation node uses square brackets, definition uses rounded
+    # n0["..."] for equation, n1(["..."]) for definition
+    assert 'n0["' in text
+    assert 'n1(["' in text
+
+
+def test_report_handles_empty_list(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run(["/report empty", "/quit"])
+    text = (tmp_path / "empty.md").read_text()
+    assert "empty" in text.lower()
+
+
+def test_report_isolated_entries_have_no_edges(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",
+        "a*a = a",
+        "/report isolated",
+        "/quit",
+    ])
+    text = (tmp_path / "isolated.md").read_text()
+    # Both nodes present in the mermaid block; no edges inside the block.
+    mermaid = text.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "n0" in mermaid and "n1" in mermaid
+    assert "-->" not in mermaid
+
+
+def test_report_without_name_prints_usage():
+    output = _run(["/report", "/quit"])
+    assert "usage: /report" in output
+
+
+def test_report_help_includes_command():
+    output = _run(["/help", "/quit"])
+    assert "/report" in output
+
+
+def test_report_mermaid_escapes_special_chars_in_labels(tmp_path, monkeypatch):
+    """Mermaid renderers (GitHub, etc.) refuse to render labels with raw
+    parens or square brackets even inside quoted strings. We must HTML-escape
+    them or the canvas comes up empty."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*(x*x)",   # contains both ( and )
+        "/report esc",
+        "/quit",
+    ])
+    text = (tmp_path / "esc.md").read_text()
+    mermaid = text.split("```mermaid", 1)[1].split("```", 1)[0]
+    # HTML entities present
+    assert "&#40;" in mermaid  # (
+    assert "&#41;" in mermaid  # )
+    assert "&#91;" in mermaid  # [
+    assert "&#93;" in mermaid  # ]
+    # No raw paren/bracket inside the mermaid block for an equation-only input
+    # (definitions would add `(["..."])` syntax — see separate test)
+    assert "(" not in mermaid
+    assert ")" not in mermaid
+
+
+def test_report_mermaid_definition_shape_still_present(tmp_path, monkeypatch):
+    """With a definition the stadium shape `(["..."])` must remain — only
+    the LABEL contents get escaped, not the surrounding mermaid syntax."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "u := x*x",
+        "/report d",
+        "/quit",
+    ])
+    text = (tmp_path / "d.md").read_text()
+    mermaid = text.split("```mermaid", 1)[1].split("```", 1)[0]
+    # Stadium shape still intact
+    assert 'n0(["' in mermaid and '"])' in mermaid
+    # The label brackets are escaped though
+    assert "&#91;0&#93;" in mermaid
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: DSL slash commands  /sym /inst /trans /rewrite /expand /fold
 # ---------------------------------------------------------------------------

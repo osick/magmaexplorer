@@ -296,6 +296,89 @@ def _do_deduction(arg: str, state: State, out: TextIO) -> None:
     out.write(f"deduction written to {path} ({len(ancestors)} entries)\n")
 
 
+def _md_escape(text: str) -> str:
+    """Escape characters that would break a markdown table cell."""
+    return text.replace("|", "\\|")
+
+
+def _mermaid_label_escape(text: str) -> str:
+    """Escape characters that confuse mermaid node-label parsers.
+
+    Mermaid's label parser treats `(`, `)`, `[`, `]` as syntax even inside
+    quoted strings on some renderers (GitHub in particular), which produces
+    an empty canvas. HTML entities render correctly everywhere.
+    """
+    return (
+        text.replace("(", "&#40;")
+            .replace(")", "&#41;")
+            .replace("[", "&#91;")
+            .replace("]", "&#93;")
+            .replace('"', "&quot;")
+    )
+
+
+def _do_report(arg: str, state: State, out: TextIO) -> None:
+    name = arg.strip()
+    if not name:
+        out.write("usage: /report <name>\n")
+        return
+
+    lines: list[str] = []
+    lines.append(f"# magmaexplorer report: {name}")
+    lines.append("")
+    lines.append(f"_{len(state.entries)} entries_")
+    lines.append("")
+
+    if not state.entries:
+        lines.append("(list is empty)")
+    else:
+        lines.append("## Entries")
+        lines.append("")
+        lines.append("| # | Kind | Statement | Sources | Steps |")
+        lines.append("|---|------|-----------|---------|-------|")
+        for i, e in enumerate(state.entries):
+            statement = _md_escape(pretty_entry(e.content))
+            sources = _format_sources(e.sources)
+            if e.steps:
+                steps_md = "<br>".join(
+                    _md_escape(f"{k}. {s}") for k, s in enumerate(e.steps, 1)
+                )
+            else:
+                steps_md = "-"
+            lines.append(
+                f"| [{i}] | {_kind(e.content)} | `{statement}` | {sources} | {steps_md} |"
+            )
+        lines.append("")
+
+        lines.append("## Deduction graph")
+        lines.append("")
+        lines.append("Each node is one entry. An arrow `[a] --> [b]` means `[b]` cites `[a]` as a source.")
+        lines.append("Definitions are drawn with rounded corners; equations with rectangles.")
+        lines.append("")
+        lines.append("```mermaid")
+        lines.append("graph TD")
+        for i, e in enumerate(state.entries):
+            label = _mermaid_label_escape(f"[{i}] {pretty_entry(e.content)}")
+            if isinstance(e.content, Definition):
+                lines.append(f'    n{i}(["{label}"])')
+            else:
+                lines.append(f'    n{i}["{label}"]')
+        for i, e in enumerate(state.entries):
+            for s in e.sources:
+                if 0 <= s < len(state.entries):
+                    lines.append(f"    n{s} --> n{i}")
+        lines.append("```")
+
+    path = f"{name}.md"
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        out.write(f"report failed: {exc}\n")
+        return
+    out.write(f"report written to {path} ({len(state.entries)} entries)\n")
+
+
 def _do_verify(arg: str, state: State, critic: CriticCallable, out: TextIO) -> None:
     if not arg:
         out.write("usage: /verify <index>\n")
@@ -341,6 +424,8 @@ _HELP_TEXT = """commands:
   /deduction <from> <to> <name>
                     export the proof subtree from <from> to <to> as a
                     structured YAML file <name>.deduction
+  /report <name>    export the full list as a markdown file <name>.md with a
+                    table and a mermaid graph of the deduction relations
   /clear            empty the entire list (asks for confirmation)
   /clear <i>        delete entry i and every entry derived from it (cascading)
   /save <path>      write list to a JSON file
@@ -472,6 +557,8 @@ def _handle_slash(
         _do_verify(arg, state, critic, out)
     elif cmd == "/deduction":
         _do_deduction(arg, state, out)
+    elif cmd == "/report":
+        _do_report(arg, state, out)
     elif cmd == "/clear":
         _do_clear(arg, state, out, read_input)
     elif cmd == "/save":
