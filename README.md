@@ -16,7 +16,7 @@ LLM features (everything involving the Anthropic API) require:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-All other features — direct input, DSL derivation primitives, save/load, `/list`, `/deduction`, `/report`, `/lean` — work without the key.
+All other features — direct input, DSL derivation primitives, save/load, `/list`, `/deduction`, `/report`, `/lean`, `/lean-implication` — work without the key.
 
 
 ## Quickstart
@@ -269,6 +269,12 @@ Export the **entire current list** as a markdown file `<name>.md` containing a p
 
 Export the entire current list as a Lean 4 script `<name>.lean` (or `<name>` if it already ends in `.lean`). Axiom entries become `axiom` declarations, derived entries become `theorem … := by sorry`, and the DSL steps used to derive each one are recorded in the comment above. See [/lean Export](#lean-export).
 
+```text
+/lean-implication <from> <to> <name>
+```
+
+Export a **single competition-shaped Lean 4 theorem** proving entry `[to]` from entry `[from]`. The hypothesis appears as the proof parameter `h` (no `axiom` declarations — the equational-theories Stage 2 judge rejects those as `incomplete_proof`), intermediate entries are inlined as universally-quantified `have` blocks, and the final tactic block discharges the goal. See [/lean-implication Export](#lean-implication-export).
+
 
 ## Derivation DSL Spec
 
@@ -464,14 +470,19 @@ graph TD
 /lean <name>
 ```
 
-Writes `<name>.lean` (the `.lean` extension is added automatically if absent). The script is a self-contained Lean 4 starter file you can fill in to produce a formal proof of the derivation chain — for example to submit to the [equational-theories distillation challenge](https://competition.sair.foundation/competitions/mathematics-distillation-challenge-equational-theories-stage2/overview).
+Writes `<name>.lean` (the `.lean` extension is added automatically if absent). The script is a self-contained Lean 4 file you can extend into a formal proof of the derivation chain — for example to submit to the [equational-theories distillation challenge](https://competition.sair.foundation/competitions/mathematics-distillation-challenge-equational-theories-stage2/overview).
 
 The structure of the file:
 
-1. **Preamble** — a header comment explaining the file, followed by `variable {G : Type*} [Mul G]` so each entry can be stated over a generic magma `G`.
+1. **Preamble** — a header comment explaining the file. There is **no `variable {G ...}` declaration**: `axiom` in Lean 4 does not pick up `variable` and `Type*` is a Mathlib-only shorthand, so every axiom and theorem carries its own explicit `{G : Type _} [Mul G]` binders. The file therefore compiles in both vanilla Lean 4 and Mathlib environments without needing any imports.
 2. **One block per entry**, in order:
    - **Axiom entries** (no sources, no steps) become `axiom eq_<i> : ∀ <vars> : G, <lhs> = <rhs>` — the equation is asserted as a hypothesis you reason from.
-   - **Derived entries** become `theorem eq_<i> : ∀ <vars> : G, <lhs> = <rhs> := by sorry`, with a comment block above that names the cited sources and lists the DSL steps the REPL used to derive them. The `sorry` is your placeholder — replace it with the actual Lean tactics (the DSL primitives map naturally: `sym` → `Eq.symm`, `trans` → `Eq.trans`, `inst` → specializing a hypothesis, `rewrite` → `rw [...]`, etc.).
+   - **Derived entries** become `theorem eq_<i> : ∀ <vars> : G, <lhs> = <rhs> := by …`, with a comment block above that names the cited sources and lists the DSL steps the REPL used to derive them. For single-step entries whose primitive is `sym`, `inst`, `trans`, or `rewrite` (with `[i]`-style entry references), `/lean` writes a **real proof body** instead of `sorry`:
+     - `sym [i]` → `intro <vars>; exact (eq_<i> <vars>).symm`
+     - `inst [i] x:=t1, y:=t2` → `intro <vars>; exact eq_<i> <args>` (args follow `[i]`'s alpha-sorted ∀-order; compound terms get parenthesised)
+     - `trans [a] [b]` → `intro <vars>; exact (eq_<a> …).trans (eq_<b> …)` with `.symm` insertions for the orientation `dsl.execute_step` actually matched. Any "orphan" variable (bound in `[a]` or `[b]` but not in the result) is filled with the first goal variable — both sides use the same witness so the chain type-checks.
+     - `rewrite [i] using [j]` → `intro <vars>; have h := eq_<i> <args>; rw [eq_<j>] at h; exact h` — and `rewrite [i] using [j] backwards` uses `rw [← eq_<j>] at h`. A `-- NOTE` comment warns that Lean's `rw` rewrites **all** occurrences while the DSL only rewrites the leftmost-outermost one; for multi-occurrence cases swap `rw` for `nth_rewrite 1` (from Mathlib).
+   - For everything else — multi-step entries, steps using `s<k>` step references, and the `expand`/`fold` primitives — the body still falls back to `sorry`, with a one-line hint comment naming what's missing. Multi-step needs intermediate `have`s that don't preserve universal quantification cleanly; `expand`/`fold` rely on syntactic definitions that have no direct Lean counterpart, so the user fills them in (typically by inlining the definition body, then applying `rw`).
    - **Definitions** appear only as a comment — they are syntactic abbreviations in magmaexplorer with no direct Lean counterpart, so the comment tells you to inline the body wherever the name appears.
 
 Free variables are collected from each equation and quantified at the top of its theorem signature in alphabetical order, so every entry is self-contained.
@@ -481,34 +492,96 @@ Example output after `x*y = y*(x*x)`, `p := x*x`, `/sym 0`, `/inst 0 x:=a, y:=b`
 ```lean
 -- magmaexplorer export: smoke
 -- 4 entries
---
--- Each `axiom` is an input equation (no derivation in the REPL).
--- Each `theorem` carries a `sorry` placeholder; the comment block above it
--- records the DSL primitives the magmaexplorer REPL used to derive it.
--- Fill in the `by ...` blocks to produce a complete Lean proof script for
--- submission (e.g. to the equational-theories distillation challenge).
-
-variable {G : Type*} [Mul G]
-
+-- (header comment elided; the real file documents the per-declaration
+-- binders convention)
 
 -- [0] axiom: x*y = y*(x*x)
-axiom eq_0 : ∀ x y : G, x * y = y * (x * x)
+axiom eq_0 {G : Type _} [Mul G] : ∀ x y : G, x * y = y * (x * x)
 
 -- [1] definition: p := x*x
 --     (syntactic abbreviation; inline `p` as `x * x` where needed)
 
 -- [2] derived from [0]
 --     1. sym [0]
-theorem eq_2 : ∀ x y : G, y * (x * x) = x * y := by
-  sorry
+theorem eq_2 {G : Type _} [Mul G] : ∀ x y : G, y * (x * x) = x * y := by
+  intro x y
+  exact (eq_0 x y).symm
 
 -- [3] derived from [0]
 --     1. inst [0] x:=a, y:=b
-theorem eq_3 : ∀ a b : G, a * b = b * (a * a) := by
-  sorry
+theorem eq_3 {G : Type _} [Mul G] : ∀ a b : G, a * b = b * (a * a) := by
+  intro a b
+  exact eq_0 a b
 ```
 
 `/lean` is read-only: it does not mutate the list.
+
+
+## /lean-implication Export
+
+```text
+/lean-implication <from> <to> <name>
+```
+
+Writes `<name>.lean` containing **one** Lean 4 theorem — the competition-shaped output the [equational-theories Stage 2 distillation challenge](https://competition.sair.foundation/competitions/mathematics-distillation-challenge-equational-theories-stage2/overview) expects. Unlike `/lean`, which exports your entire derivation log as separate `axiom`/`theorem` blocks, `/lean-implication` consolidates everything into a single proof:
+
+```lean
+theorem implication {G : Type _} [Mul G]
+    (h : ∀ <vars> : G, <hypothesis equation>) :
+    ∀ <vars> : G, <goal equation> := by
+  -- intermediate entries inlined as universally-quantified `have` blocks
+  have h_<i> : ∀ <vars> : G, <intermediate eq> := by
+    intro <vars>
+    <DSL-translated tactics, using `h` and earlier `h_<j>`>
+  …
+  -- final body discharges the goal
+  intro <goal vars>
+  <DSL-translated tactics>
+```
+
+Key properties — all required by the Stage 2 judge:
+
+- **No `axiom` declarations.** The hypothesis is the explicit proof parameter `h`. The judge rejects any submission that introduces a fresh axiom (only `propext`, `Quot.sound`, `Classical.choice` are allowed).
+- **No `sorry`.** If every step on the chain from `[from]` to `[to]` is a single auto-translatable DSL primitive (sym, inst, trans, rewrite), the proof is complete. (Multi-step / expand / fold steps would still leave a `sorry`; in that case the command warns rather than emits an unaccepted certificate.)
+- **Universally-quantified intermediates.** Each `have h_<i>` is `∀ … : G, …`, so subsequent steps can apply it via `inst`/`sym`/`trans`/`rewrite` exactly as if it were one of the original entries.
+- **Self-contained `{G : Type _} [Mul G]` binders** — no Mathlib imports needed, no `Type*` (Mathlib-only).
+
+**When it refuses** (no file written, error printed):
+
+| Cause | Message |
+|---|---|
+| `[from]` is not an ancestor of `[to]` | `[from] is not an ancestor of [to]` |
+| Some ancestor of `[to]` is an axiom other than `[from]` | `[i] is an axiom but is not the hypothesis [from]; cannot prove the goal from `h` alone` |
+| Some ancestor is a `Definition` | `[i] is a definition; expand/fold are not yet auto-translated…` |
+| `[from]` or `[to]` is a `Definition` | `[i] is not an equation; cannot use as hypothesis/goal` |
+
+For the **equational-theories Lean project specifically**, swap `[Mul G]` for `[Magma G]` and `*` for the project's `◇` notation as needed — the rest of the proof structure ports verbatim.
+
+Worked example (commutativity composed with renaming):
+
+```text
+> x*y = y*x          # [0] — input hypothesis
+> /sym 0             # [1] — y*x = x*y, from [0]
+> /inst 1 x:=a, y:=b # [2] — b*a = a*b, from [1]
+> /lean-implication 0 2 commute_impl
+```
+
+produces `commute_impl.lean`:
+
+```lean
+theorem implication {G : Type _} [Mul G]
+    (h : ∀ x y : G, x * y = y * x) :
+    ∀ a b : G, b * a = a * b := by
+  have h_1 : ∀ x y : G, y * x = x * y := by
+    intro x y
+    exact (h x y).symm
+  intro a b
+  exact h_1 a b
+```
+
+Run `lean commute_impl.lean` — exit 0, no output, no `sorry`s. That's a judge-accepted Stage 2 certificate.
+
+`/lean-implication` is read-only: it does not mutate the list.
 
 
 ## JSON Save Format

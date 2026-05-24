@@ -1127,12 +1127,32 @@ def test_lean_existing_extension_kept(tmp_path, monkeypatch):
     assert not (tmp_path / "foo.lean.lean").exists()
 
 
-def test_lean_has_magma_preamble(tmp_path, monkeypatch):
-    """The file declares a magma type variable G with a Mul instance."""
+def test_lean_has_magma_binders_on_each_declaration(tmp_path, monkeypatch):
+    """Every axiom and theorem carries its own `{G : Type _} [Mul G]`
+    binders so the file compiles in both vanilla Lean 4 and Mathlib —
+    `axiom` does NOT pick up `variable` declarations, and `Type*` is
+    Mathlib-only."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # Both the axiom and the derived theorem have explicit binders.
+    assert "axiom eq_0 {G : Type _} [Mul G] :" in text
+    assert "theorem eq_1 {G : Type _} [Mul G] :" in text
+
+
+def test_lean_no_typestar_or_redundant_variable_line(tmp_path, monkeypatch):
+    """Type* is Mathlib-only; the file uses `Type _` instead. The `variable`
+    line is omitted because we put binders directly on each declaration.
+
+    Only the actual Lean code lines are inspected — the preamble comment is
+    allowed to mention `Type*` while explaining why we don't use it."""
     monkeypatch.chdir(tmp_path)
     _run(["x*y = y*x", "/lean foo", "/quit"])
     text = (tmp_path / "foo.lean").read_text()
-    assert "variable" in text and "G" in text and "Mul G" in text
+    code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("--")]
+    code = "\n".join(code_lines)
+    assert "Type*" not in code
+    assert not any(ln.startswith("variable ") for ln in code_lines)
 
 
 def test_lean_axiom_for_no_source_entry(tmp_path, monkeypatch):
@@ -1146,14 +1166,343 @@ def test_lean_axiom_for_no_source_entry(tmp_path, monkeypatch):
     assert "x * y = y * (x * x)" in text
 
 
-def test_lean_theorem_with_sorry_for_derived(tmp_path, monkeypatch):
-    """Derived entries become `theorem eq_i : ... := by sorry`."""
+def test_lean_theorem_emitted_for_derived(tmp_path, monkeypatch):
+    """Derived entries become `theorem eq_i : ... := by ...`. The body
+    is now a real proof when the DSL primitive is auto-translatable
+    (sym/inst/trans); only un-translatable steps keep `sorry`."""
     monkeypatch.chdir(tmp_path)
     _run(["x*y = y*x", "/sym 0", "/lean foo", "/quit"])
     text = (tmp_path / "foo.lean").read_text()
     assert "theorem eq_1" in text
-    assert "sorry" in text
     assert "y * x = x * y" in text
+
+
+# ---------------------------------------------------------------------------
+# /lean — auto-generated term proofs for sym, inst, trans
+# ---------------------------------------------------------------------------
+
+def test_lean_sym_emits_symm_term_proof(tmp_path, monkeypatch):
+    """A single-step `sym [i]` entry produces a real Lean proof using
+    `Eq.symm`, NOT a `sorry`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # The proof body uses the symm of the source axiom.
+    assert "(eq_0 x y).symm" in text
+    # And the theorem body for eq_1 does NOT contain `sorry`.
+    eq1_block = text.split("theorem eq_1")[1].split("\n\n", 1)[0]
+    assert "sorry" not in eq1_block
+
+
+def test_lean_inst_emits_application_term_proof(tmp_path, monkeypatch):
+    """A single-step `inst [i] x:=a, y:=b` becomes `exact eq_i a b`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*(x*x)", "/inst 0 x:=a, y:=b", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # eq_0's bound vars are alphabetised (x then y), so args are (a, b).
+    assert "exact eq_0 a b" in text
+    eq1_block = text.split("theorem eq_1")[1].split("\n\n", 1)[0]
+    assert "sorry" not in eq1_block
+
+
+def test_lean_inst_parenthesises_compound_term_arg(tmp_path, monkeypatch):
+    """When a substitution value is itself an operator term (e.g. x:=a*b),
+    Lean needs it parenthesised in the application: `eq_0 (a * b) c`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/inst 0 x:=a*b, y:=c", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "exact eq_0 (a * b) c" in text
+
+
+def test_lean_inst_partial_substitution_keeps_other_vars(tmp_path, monkeypatch):
+    """An inst that leaves some vars unchanged passes the literal var name
+    for the unchanged ones — they remain in the goal's binder."""
+    monkeypatch.chdir(tmp_path)
+    # eq_0 has bound vars {x, y}; only x is substituted.
+    _run(["x*y = y*x", "/inst 0 x:=a", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # Result equation: a*y = y*a (free vars {a, y}), passed as `eq_0 a y`.
+    assert "exact eq_0 a y" in text
+
+
+def test_lean_trans_emits_trans_term_proof(tmp_path, monkeypatch):
+    """A single-step `trans [a] [b]` produces `(eq_a ...).trans (eq_b ...)`
+    when the orientation is `a.rhs = b.lhs`."""
+    monkeypatch.chdir(tmp_path)
+    # a: x = y, b: y = z; trans gives x = z.
+    _run(["x = y", "y = z", "/trans 0 1", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # Both axioms are applied to literal vars; the matching var `y` is
+    # in both V_a and V_b, and is also a goal var (V_r = [x, y, z]? no:
+    # V_r = vars of result `x = z` = {x, z}, so `y` is an orphan).
+    # Orphans are filled with the first goal var; so eq_0 receives (x, x)
+    # and eq_1 receives (x, z) — both type-check via uniform witness choice.
+    eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
+    assert "sorry" not in eq2_block
+    assert ".trans" in eq2_block
+    assert "eq_0" in eq2_block and "eq_1" in eq2_block
+
+
+def test_lean_trans_uses_symm_when_a_lhs_matches_b_lhs(tmp_path, monkeypatch):
+    """Orientation where both LHSes match needs `.symm` on the first arg."""
+    monkeypatch.chdir(tmp_path)
+    # a: y = x, b: y = z; a.lhs == b.lhs, so result = x = z via (a.symm).trans b.
+    _run(["y = x", "y = z", "/trans 0 1", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
+    assert ".symm" in eq2_block
+    assert "sorry" not in eq2_block
+
+
+def test_lean_multi_step_falls_back_to_sorry(tmp_path, monkeypatch):
+    """Multi-step entries (with intermediate s<k> references or several
+    DSL primitives in sequence) currently still emit `sorry`."""
+    def fake_llm(eqs, cmd):
+        return LLMResult(
+            equation="y*(x*x) = x*y",
+            sources=[0],
+            steps=["sym [0]", "sym s1"],   # multi-step, references s1
+        )
+
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*(x*x)", "go", "/lean foo", "/quit"], llm=fake_llm)
+    text = (tmp_path / "foo.lean").read_text()
+    # The derived theorem still has sorry, but the comment block lists both steps.
+    eq1_block = text.split("theorem eq_1")[1].split("\n\n", 1)[0]
+    assert "sorry" in eq1_block
+
+
+def test_lean_rewrite_forward_emits_rw_at_hypothesis(tmp_path, monkeypatch):
+    """`rewrite [i] using [j]` becomes `rw [eq_j] at h` after pulling [i]
+    into a hypothesis via `have`."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "a*x = x*a",        # [0]  target
+        "x = b",             # [1]  rule
+        "/rewrite 0 using 1",
+        "/lean foo",
+        "/quit",
+    ])
+    text = (tmp_path / "foo.lean").read_text()
+    eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
+    assert "have h" in eq2_block
+    assert "rw [eq_1] at h" in eq2_block
+    assert "exact h" in eq2_block
+    assert "sorry" not in eq2_block
+
+
+def test_lean_rewrite_backwards_uses_arrow(tmp_path, monkeypatch):
+    """`rewrite [i] using [j] backwards` becomes `rw [← eq_j] at h`."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "a*a = b*a",         # [0]  target — RHS of rule (a*a) appears here
+        "c = a*a",           # [1]  rule — backwards turns a*a → c
+        "/rewrite 0 using 1 backwards",
+        "/lean foo",
+        "/quit",
+    ])
+    text = (tmp_path / "foo.lean").read_text()
+    eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
+    assert "rw [← eq_1] at h" in eq2_block
+    assert "sorry" not in eq2_block
+
+
+def test_lean_rewrite_includes_caveat_comment(tmp_path, monkeypatch):
+    """The auto-generated rewrite proof carries a `-- NOTE:` line warning
+    that Lean's `rw` rewrites all occurrences, while the DSL does only
+    the leftmost-outermost — so the proof may need `nth_rewrite 1`."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "a*x = x*a",
+        "x = b",
+        "/rewrite 0 using 1",
+        "/lean foo",
+        "/quit",
+    ])
+    text = (tmp_path / "foo.lean").read_text()
+    eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
+    assert "nth_rewrite" in eq2_block.lower() or "all occurrences" in eq2_block.lower()
+
+
+def test_lean_expand_still_falls_back_to_sorry(tmp_path, monkeypatch):
+    """expand/fold still emit sorry — definitions have no direct Lean form."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "p := x*x",          # [0] definition
+        "p = y",             # [1] equation using p
+        "/expand 1 0",       # expand p in [1] using definition [0]
+        "/lean foo",
+        "/quit",
+    ])
+    text = (tmp_path / "foo.lean").read_text()
+    # The expanded theorem (whatever index it lands at) still has sorry.
+    if "theorem eq_2" in text:
+        eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
+        assert "sorry" in eq2_block
+
+
+def test_lean_axiom_block_unchanged(tmp_path, monkeypatch):
+    """Sanity: axioms still emit `axiom eq_i`, not `theorem ... := by ...`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*(x*x)", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "axiom eq_0" in text
+    assert "theorem eq_0" not in text
+
+
+# ---------------------------------------------------------------------------
+# /lean-implication <from> <to> <name> — single competition-shaped theorem
+# ---------------------------------------------------------------------------
+
+
+def _lean_code_lines(text: str) -> list[str]:
+    """Return only the non-comment lines of a Lean file."""
+    return [ln for ln in text.splitlines() if not ln.lstrip().startswith("--")]
+
+
+def test_lean_implication_no_args_prints_usage():
+    output = _run(["/lean-implication", "/quit"])
+    assert "usage: /lean-implication" in output
+
+
+def test_lean_implication_missing_name_prints_usage():
+    output = _run(["x*y = y*x", "/sym 0", "/lean-implication 0 1", "/quit"])
+    assert "usage: /lean-implication" in output
+
+
+def test_lean_implication_help_lists_command():
+    output = _run(["/help", "/quit"])
+    assert "/lean-implication" in output
+
+
+def test_lean_implication_writes_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean-implication 0 1 foo", "/quit"])
+    assert (tmp_path / "foo.lean").exists()
+
+
+def test_lean_implication_existing_extension_kept(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean-implication 0 1 foo.lean", "/quit"])
+    assert (tmp_path / "foo.lean").exists()
+    assert not (tmp_path / "foo.lean.lean").exists()
+
+
+def test_lean_implication_sym_uses_hypothesis_not_axiom(tmp_path, monkeypatch):
+    """Single `/sym 0` implication: hypothesis is `h`, no `axiom`, no `sorry`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean-implication 0 1 foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "theorem implication" in text
+    assert "{G : Type _} [Mul G]" in text
+    assert "(h : ∀ x y : G, x * y = y * x)" in text
+    assert "∀ x y : G, y * x = x * y" in text
+    assert "(h x y).symm" in text
+    # No axiom or sorry in CODE lines (preamble comments are fine).
+    code = "\n".join(_lean_code_lines(text))
+    assert "axiom " not in code
+    assert "sorry" not in code
+
+
+def test_lean_implication_inst_specializes_h(tmp_path, monkeypatch):
+    """`/inst 0 x:=a, y:=b` becomes `exact h a b` (no eq_0)."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*(x*x)", "/inst 0 x:=a, y:=b", "/lean-implication 0 1 foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "exact h a b" in text
+    code = "\n".join(_lean_code_lines(text))
+    assert "eq_0" not in code
+    assert "axiom " not in code
+    assert "sorry" not in code
+
+
+def test_lean_implication_intermediate_become_have_blocks(tmp_path, monkeypatch):
+    """A chain that passes through an intermediate entry emits that entry as
+    a universally-quantified `have h_<i> : ... := by intro ...; exact ...`."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",          # [0] axiom
+        "/sym 0",             # [1] y*x = x*y, derived from [0]
+        "/inst 1 x:=a, y:=b", # [2] b*a = a*b, derived from [1]
+        "/lean-implication 0 2 foo",
+        "/quit",
+    ])
+    text = (tmp_path / "foo.lean").read_text()
+    # h_1 appears as a universally-quantified have, then is specialised in
+    # the final exact step.
+    assert "have h_1" in text
+    assert "(h x y).symm" in text
+    assert "h_1 a b" in text
+    code = "\n".join(_lean_code_lines(text))
+    assert "axiom " not in code
+    assert "sorry" not in code
+
+
+def test_lean_implication_error_when_from_not_ancestor(tmp_path, monkeypatch):
+    """`[from]` must be an ancestor of `[to]`; otherwise refuse and emit no file."""
+    monkeypatch.chdir(tmp_path)
+    output = _run([
+        "x*y = y*x",  # [0]
+        "a = b",      # [1] unrelated axiom
+        "/sym 1",     # [2] = b = a, ancestor only [1]
+        "/lean-implication 0 2 foo",
+        "/quit",
+    ])
+    assert "ancestor" in output.lower() or "not reachable" in output.lower()
+    assert not (tmp_path / "foo.lean").exists()
+
+
+def test_lean_implication_error_when_unrelated_axiom_in_chain(tmp_path, monkeypatch):
+    """The chain may not contain an axiom other than [from] — we'd have no
+    way to prove it from h alone."""
+    monkeypatch.chdir(tmp_path)
+    output = _run([
+        "a = b",      # [0]
+        "b = c",      # [1] second axiom
+        "/trans 0 1", # [2] derived from BOTH [0] and [1]
+        "/lean-implication 0 2 foo",
+        "/quit",
+    ])
+    assert "axiom" in output.lower() and "[1]" in output
+    assert not (tmp_path / "foo.lean").exists()
+
+
+def test_lean_implication_to_equals_from_is_trivial(tmp_path, monkeypatch):
+    """`/lean-implication i i name` is the trivial reflexive implication
+    `h ⊢ h` — still produces a compileable file, just `exact h`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/lean-implication 0 0 foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "theorem implication" in text
+    assert "exact h" in text
+    code = "\n".join(_lean_code_lines(text))
+    assert "axiom " not in code
+    assert "sorry" not in code
+
+
+def test_lean_implication_confirmation_message(tmp_path, monkeypatch):
+    """The REPL prints a `wrote …` confirmation after success."""
+    monkeypatch.chdir(tmp_path)
+    output = _run(["x*y = y*x", "/sym 0", "/lean-implication 0 1 foo", "/quit"])
+    assert "foo.lean" in output
+
+
+def test_lean_implication_definition_in_chain_errors(tmp_path, monkeypatch):
+    """A Definition entry on the path can't be translated (expand/fold not
+    auto-translated yet); refuse with an error."""
+    monkeypatch.chdir(tmp_path)
+    output = _run([
+        "p := x*x",      # [0] definition
+        "p = y",         # [1] axiom mentioning p
+        "/expand 1 0",   # [2] expand p in [1] using def [0]
+        "/lean-implication 1 2 foo",
+        "/quit",
+    ])
+    # Either the definition is flagged or expand is, but the file shouldn't
+    # be written with a sorry — the command refuses.
+    assert ("definition" in output.lower() or "expand" in output.lower()
+            or "cannot" in output.lower())
+    assert not (tmp_path / "foo.lean").exists()
 
 
 def test_lean_definition_becomes_comment(tmp_path, monkeypatch):
@@ -1194,10 +1543,9 @@ def test_lean_empty_list(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _run(["/lean empty", "/quit"])
     text = (tmp_path / "empty.lean").read_text()
-    assert "variable" in text  # preamble present
-    # No axiom/theorem declarations should be emitted; the preamble comment
-    # mentions the words `axiom` and `theorem` so we look for the actual
-    # Lean keyword pattern at the start of a non-comment line.
+    # Preamble comment is always present.
+    assert "magmaexplorer export" in text
+    # No axiom/theorem declarations should be emitted.
     code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("--")]
     assert not any(ln.startswith("axiom ") for ln in code_lines)
     assert not any(ln.startswith("theorem ") for ln in code_lines)

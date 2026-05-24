@@ -462,13 +462,188 @@ _LEAN_PREAMBLE = """-- magmaexplorer export: {name}
 -- {count} {entries_word}
 --
 -- Each `axiom` is an input equation (no derivation in the REPL).
--- Each `theorem` carries a `sorry` placeholder; the comment block above it
--- records the DSL primitives the magmaexplorer REPL used to derive it.
+-- Each `theorem` carries a proof or a `sorry` placeholder; the comment block
+-- above it records the DSL primitives the magmaexplorer REPL used to derive it.
 -- Fill in the `by ...` blocks to produce a complete Lean proof script for
 -- submission (e.g. to the equational-theories distillation challenge).
-
-variable {{G : Type*}} [Mul G]
+--
+-- Each declaration carries its own `{{G : Type _}} [Mul G]` binders. `axiom`
+-- does not pick up `variable` declarations in Lean 4 and `Type*` is a
+-- Mathlib-only shorthand, so making the binders explicit keeps the file
+-- compiling in both vanilla Lean 4 and Mathlib environments.
 """
+
+_LEAN_BINDERS = "{G : Type _} [Mul G]"
+
+
+def _term_to_lean_arg(t) -> str:
+    """Render a term for use as an argument to a Lean function application.
+
+    Same as `_term_to_lean` but parenthesises Op terms at the top level so
+    `eq_0 (a * b) c` parses correctly (rather than `eq_0 a * b c`).
+    """
+    from .term import Op
+    rendered = _term_to_lean(t)
+    if isinstance(t, Op):
+        return f"({rendered})"
+    return rendered
+
+
+def _entry_sorted_vars(entries: list[Entry], idx: int) -> list[str] | None:
+    """Return the alpha-sorted bound vars of `entries[idx]` if it is an
+    equation; None otherwise (definitions cannot be applied as Lean facts)."""
+    if not (0 <= idx < len(entries)):
+        return None
+    e = entries[idx]
+    if not isinstance(e.content, Equation):
+        return None
+    return sorted(_collect_vars(e.content.lhs) | _collect_vars(e.content.rhs))
+
+
+def _default_eq_name(idx: int) -> str:
+    """Default name resolver used by standalone `/lean`: entry `[i]` → `eq_i`."""
+    return f"eq_{idx}"
+
+
+def _apply_eq_with_subst(name: str, src_vars: list[str], subst: dict[str, "object"]) -> str:
+    """Build `<name> arg1 arg2 ...` for Inst: each src var either maps to
+    its substituted Lean term, or keeps its own name. `name` is the Lean
+    identifier for the universally-quantified target equation — typically
+    `eq_<i>` in standalone mode, `h` or `h_<i>` in implication mode."""
+    args = []
+    for v in src_vars:
+        if v in subst:
+            args.append(_term_to_lean_arg(subst[v]))
+        else:
+            args.append(v)
+    return f"{name} {' '.join(args)}".strip() if args else name
+
+
+def _apply_eq_for_trans(name: str, src_vars: list[str], goal_vars: list[str]) -> str:
+    """Build `<name> arg1 arg2 ...` for Trans: each src var that is also a
+    goal var passes through unchanged; any "orphan" var (in V_src but not in
+    V_r) is filled with the first goal var (any G works because both sides
+    use the same witness, so the chain still type-checks)."""
+    if not src_vars:
+        return name
+    fallback = goal_vars[0] if goal_vars else "default"
+    args = [v if v in goal_vars else fallback for v in src_vars]
+    return f"{name} {' '.join(args)}".strip()
+
+
+def _lean_proof_body(
+    entry: Entry,
+    entries: list[Entry],
+    goal_vars: list[str],
+    name=_default_eq_name,
+) -> list[str]:
+    """Build the lines that go inside the `by` block of a derived theorem.
+
+    Returns `["  intro ...", "  exact ..."]` for translatable single-step
+    entries, or `["  sorry"]` (possibly with a hint comment) for everything
+    we can't yet auto-translate.
+
+    `name` is a `Callable[[int], str]` that maps an entry index to the Lean
+    identifier the proof should use for that entry's universally-quantified
+    equation. Standalone `/lean` uses the default (`eq_<i>`); implication
+    mode passes a resolver that returns `h` for the hypothesis index and
+    `h_<i>` for inlined intermediates.
+    """
+    # Multi-step is out of scope for the MVP — fall back.
+    if len(entry.steps) != 1:
+        return ["  sorry  -- multi-step derivation; translate the chain manually"]
+
+    raw = entry.steps[0]
+    clean = _strip_verify_prefix(raw)
+    if "   [" in clean:
+        clean = clean.split("   [", 1)[0].rstrip()
+
+    try:
+        step = _dsl.parse_step(clean)
+    except DSLError:
+        return [f"  sorry  -- step did not parse as DSL: {raw}"]
+
+    intro_line = f"  intro {' '.join(goal_vars)}" if goal_vars else None
+
+    def _emit(exact_term: str) -> list[str]:
+        body = []
+        if intro_line is not None:
+            body.append(intro_line)
+        body.append(f"  exact {exact_term}")
+        return body
+
+    # --- sym -----------------------------------------------------------------
+    if isinstance(step, _dsl.Sym):
+        if not isinstance(step.target, EntryRef):
+            return [f"  sorry  -- sym on step-ref not auto-translated: {raw}"]
+        src_vars = _entry_sorted_vars(entries, step.target.index)
+        if src_vars is None:
+            return [f"  sorry  -- sym target is not an equation: {raw}"]
+        tgt_name = name(step.target.index)
+        applied = f"{tgt_name} {' '.join(src_vars)}".strip() if src_vars else tgt_name
+        return _emit(f"({applied}).symm")
+
+    # --- inst ----------------------------------------------------------------
+    if isinstance(step, _dsl.Inst):
+        if not isinstance(step.target, EntryRef):
+            return [f"  sorry  -- inst on step-ref not auto-translated: {raw}"]
+        src_vars = _entry_sorted_vars(entries, step.target.index)
+        if src_vars is None:
+            return [f"  sorry  -- inst target is not an equation: {raw}"]
+        subst = {v: t for v, t in step.substitutions}
+        return _emit(_apply_eq_with_subst(name(step.target.index), src_vars, subst))
+
+    # --- trans ---------------------------------------------------------------
+    if isinstance(step, _dsl.Trans):
+        if not (isinstance(step.left, EntryRef) and isinstance(step.right, EntryRef)):
+            return [f"  sorry  -- trans on step-ref not auto-translated: {raw}"]
+        a_idx = step.left.index
+        b_idx = step.right.index
+        a_vars = _entry_sorted_vars(entries, a_idx)
+        b_vars = _entry_sorted_vars(entries, b_idx)
+        if a_vars is None or b_vars is None:
+            return [f"  sorry  -- trans operand is not an equation: {raw}"]
+        a_eq = entries[a_idx].content
+        b_eq = entries[b_idx].content
+        a_apply = _apply_eq_for_trans(name(a_idx), a_vars, goal_vars)
+        b_apply = _apply_eq_for_trans(name(b_idx), b_vars, goal_vars)
+        if a_eq.rhs == b_eq.lhs:
+            return _emit(f"({a_apply}).trans ({b_apply})")
+        if a_eq.lhs == b_eq.lhs:
+            return _emit(f"({a_apply}).symm.trans ({b_apply})")
+        if a_eq.rhs == b_eq.rhs:
+            return _emit(f"({a_apply}).trans ({b_apply}).symm")
+        if a_eq.lhs == b_eq.rhs:
+            return _emit(f"({a_apply}).symm.trans ({b_apply}).symm")
+        return [f"  sorry  -- trans: no shared side detected (should not happen)"]
+
+    # --- rewrite -------------------------------------------------------------
+    if isinstance(step, _dsl.Rewrite):
+        if not (isinstance(step.target, EntryRef) and isinstance(step.rule, EntryRef)):
+            return [f"  sorry  -- rewrite on step-ref not auto-translated: {raw}"]
+        t_idx = step.target.index
+        r_idx = step.rule.index
+        t_vars = _entry_sorted_vars(entries, t_idx)
+        if t_vars is None or _entry_sorted_vars(entries, r_idx) is None:
+            return [f"  sorry  -- rewrite operand is not an equation: {raw}"]
+        t_apply = _apply_eq_for_trans(name(t_idx), t_vars, goal_vars)
+        arrow = "← " if step.backwards else ""
+        # Local hypothesis name `h_rw` avoids clashing with the outer `h`
+        # the implication-mode wrapper introduces.
+        body: list[str] = []
+        if intro_line is not None:
+            body.append(intro_line)
+        body.append(f"  -- NOTE: `rw` rewrites ALL occurrences; the DSL only rewrites the")
+        body.append(f"  -- leftmost-outermost one. If the goal disagrees, replace `rw` with")
+        body.append(f"  -- `nth_rewrite 1` (from Mathlib) to target a single occurrence.")
+        body.append(f"  have h_rw := {t_apply}")
+        body.append(f"  rw [{arrow}{name(r_idx)}] at h_rw")
+        body.append("  exact h_rw")
+        return body
+
+    # expand / fold — not yet auto-translated
+    primitive_name = _PRIMITIVE_NAME.get(type(step), "<unknown>")
+    return [f"  sorry  -- {primitive_name} not yet auto-translated; magmaexplorer definitions have no direct Lean counterpart"]
 
 
 def _do_lean(arg: str, state: State, out: TextIO) -> None:
@@ -497,14 +672,16 @@ def _do_lean(arg: str, state: State, out: TextIO) -> None:
         statement = _lean_forall(e.content)
         if not e.sources and not e.steps:
             lines.append(f"-- [{i}] axiom: {pretty_entry(e.content)}")
-            lines.append(f"axiom eq_{i} : {statement}")
+            lines.append(f"axiom eq_{i} {_LEAN_BINDERS} : {statement}")
         else:
             srcs = ", ".join(f"[{s}]" for s in e.sources) if e.sources else "(none)"
             lines.append(f"-- [{i}] derived from {srcs}")
             for k, step in enumerate(e.steps, 1):
                 lines.append(f"--     {k}. {step}")
-            lines.append(f"theorem eq_{i} : {statement} := by")
-            lines.append("  sorry")
+            lines.append(f"theorem eq_{i} {_LEAN_BINDERS} : {statement} := by")
+            goal_vars = sorted(_collect_vars(e.content.lhs) | _collect_vars(e.content.rhs))
+            for line in _lean_proof_body(e, state.entries, goal_vars):
+                lines.append(line)
 
     try:
         with open(path, "w") as f:
@@ -513,6 +690,158 @@ def _do_lean(arg: str, state: State, out: TextIO) -> None:
         out.write(f"lean export failed: {exc}\n")
         return
     out.write(f"lean script written to {path} ({count} entries)\n")
+
+
+def _compute_implication_chain(
+    entries: list[Entry], from_idx: int, to_idx: int
+) -> list[int]:
+    """Return sorted indices `[from_idx, ..., to_idx]` forming the proof chain
+    of `[to]` from `[from]`. Raises `ValueError` when the chain can't be built:
+      - either index is out of range
+      - `[from]` is not an ancestor of `[to]`
+      - some ancestor of `[to]` is an axiom other than `[from]`
+        (would require a second hypothesis we don't have)
+      - some ancestor of `[to]` is a Definition
+        (expand/fold are not yet auto-translated)
+      - some ancestor cites a source outside the chain
+        (would indicate a broken sources field)
+
+    Entries are sorted by index, which is a valid topological order because
+    magmaexplorer enforces forward-reference-free derivations.
+    """
+    n = len(entries)
+    if not (0 <= from_idx < n):
+        raise ValueError(f"from index out of range: {from_idx}")
+    if not (0 <= to_idx < n):
+        raise ValueError(f"to index out of range: {to_idx}")
+
+    if from_idx == to_idx:
+        return [from_idx]
+
+    ancestors = _compute_ancestors(entries, to_idx)
+    if from_idx not in ancestors:
+        raise ValueError(
+            f"[{from_idx}] is not an ancestor of [{to_idx}]; cannot derive [{to_idx}] from [{from_idx}]"
+        )
+
+    for idx in sorted(ancestors):
+        e = entries[idx]
+        if isinstance(e.content, Definition):
+            raise ValueError(
+                f"[{idx}] is a definition; expand/fold are not yet auto-translated, "
+                f"so this implication chain cannot be compiled"
+            )
+        if idx == from_idx:
+            continue
+        if not e.sources:
+            raise ValueError(
+                f"[{idx}] is an axiom but is not the hypothesis [{from_idx}]; "
+                f"cannot prove the goal from `h` alone"
+            )
+        for src in e.sources:
+            if src not in ancestors:
+                raise ValueError(
+                    f"[{idx}] cites [{src}] which is not on the chain from "
+                    f"[{from_idx}] to [{to_idx}]"
+                )
+
+    return sorted(ancestors)
+
+
+_LEAN_IMPLICATION_PREAMBLE = """-- magmaexplorer implication: [{from_idx}] => [{to_idx}]
+-- Chain length: {n} entries.
+-- Hypothesis (h): {from_stmt}
+-- Goal:           {to_stmt}
+--
+-- The hypothesis appears as the proof parameter `h` (no `axiom` declarations,
+-- which the equational-theories Stage 2 judge would reject as `incomplete_proof`).
+-- Intermediate derivation steps are inlined as universally-quantified `have`
+-- blocks; the final tactic block discharges the goal.
+--
+-- For the equational-theories Lean project, swap `[Mul G]` for `[Magma G]` and
+-- `*` for the project's `◇` notation as needed.
+"""
+
+
+def _do_lean_implication(arg: str, state: State, out: TextIO) -> None:
+    parts = arg.split()
+    if len(parts) < 3:
+        out.write("usage: /lean-implication <from> <to> <name>\n")
+        return
+    try:
+        from_idx = int(parts[0])
+        to_idx = int(parts[1])
+    except ValueError:
+        out.write(f"invalid indices: {parts[0]!r} {parts[1]!r}\n")
+        return
+    name = " ".join(parts[2:]).strip()
+    if not name:
+        out.write("usage: /lean-implication <from> <to> <name>\n")
+        return
+
+    try:
+        chain = _compute_implication_chain(state.entries, from_idx, to_idx)
+    except ValueError as exc:
+        out.write(f"implication error: {exc}\n")
+        return
+
+    from_entry = state.entries[from_idx]
+    to_entry = state.entries[to_idx]
+    if not isinstance(from_entry.content, Equation):
+        out.write(f"[{from_idx}] is not an equation; cannot use as hypothesis\n")
+        return
+    if not isinstance(to_entry.content, Equation):
+        out.write(f"[{to_idx}] is not an equation; cannot use as goal\n")
+        return
+
+    def resolve(idx: int) -> str:
+        return "h" if idx == from_idx else f"h_{idx}"
+
+    from_stmt = _lean_forall(from_entry.content)
+    to_stmt = _lean_forall(to_entry.content)
+    to_vars = sorted(_collect_vars(to_entry.content.lhs) | _collect_vars(to_entry.content.rhs))
+
+    lines: list[str] = []
+    lines.append(_LEAN_IMPLICATION_PREAMBLE.format(
+        from_idx=from_idx,
+        to_idx=to_idx,
+        n=len(chain),
+        from_stmt=pretty_entry(from_entry.content),
+        to_stmt=pretty_entry(to_entry.content),
+    ))
+    lines.append(f"theorem implication {{G : Type _}} [Mul G]")
+    lines.append(f"    (h : {from_stmt}) :")
+    lines.append(f"    {to_stmt} := by")
+
+    if from_idx == to_idx:
+        # Trivial reflexive — `h` already has the goal's type.
+        lines.append("  exact h")
+    else:
+        # Inline every intermediate as a universally-quantified `have` so
+        # subsequent sym/inst/trans/rewrite can apply it like an axiom.
+        for idx in chain:
+            if idx == from_idx or idx == to_idx:
+                continue
+            e = state.entries[idx]
+            stmt = _lean_forall(e.content)
+            i_vars = sorted(_collect_vars(e.content.lhs) | _collect_vars(e.content.rhs))
+            lines.append(f"  have h_{idx} : {stmt} := by")
+            for ln in _lean_proof_body(e, state.entries, i_vars, name=resolve):
+                # Nested-by bodies need an extra 2 spaces of indent.
+                lines.append("  " + ln)
+        # Final goal body at the outer indent level (`_lean_proof_body`
+        # already prefixes its lines with 2 spaces).
+        for ln in _lean_proof_body(to_entry, state.entries, to_vars, name=resolve):
+            lines.append(ln)
+
+    path = name if name.endswith(".lean") else f"{name}.lean"
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        out.write(f"lean-implication failed: {exc}\n")
+        return
+    out.write(f"implication script written to {path} ({len(chain)} entries on chain)\n")
 
 
 def _do_verify(arg: str, state: State, critic: CriticCallable, out: TextIO) -> None:
@@ -565,6 +894,10 @@ _HELP_TEXT = """commands:
   /lean <name>      export the full list as a Lean 4 script <name>.lean
                     (axioms for inputs, theorem-with-sorry for derived entries,
                     DSL steps preserved as comments)
+  /lean-implication <from> <to> <name>
+                    export a single competition-shaped Lean theorem proving
+                    [to] from [from] using the hypothesis as a proof parameter
+                    `h` (no `axiom`); intermediates inlined as `have` blocks
   /clear            empty the entire list (asks for confirmation)
   /clear <i>        delete entry i and every entry derived from it (cascading)
   /save <path>      write list to a JSON file
@@ -700,6 +1033,8 @@ def _handle_slash(
         _do_report(arg, state, out)
     elif cmd == "/lean":
         _do_lean(arg, state, out)
+    elif cmd == "/lean-implication":
+        _do_lean_implication(arg, state, out)
     elif cmd == "/clear":
         _do_clear(arg, state, out, read_input)
     elif cmd == "/save":
