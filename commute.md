@@ -25,7 +25,7 @@ Definitions are drawn with rounded corners; equations with rectangles.
 
 ```mermaid
 graph TD
-    n0["&#91;0&#93; x*y = y*&#40;x*x&#41;"]
+    n0["x*y = y*(x*x)"]
     n1["&#91;1&#93; y*&#40;x*x&#41; = x*x*&#40;y*y&#41;"]
     n2["&#91;2&#93; x*y = x*x*&#40;y*y&#41;"]
     n3["&#91;3&#93; y*&#40;x*x&#41; = y*y*&#40;x*x*&#40;x*x&#41;&#41;"]

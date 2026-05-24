@@ -301,22 +301,6 @@ def _md_escape(text: str) -> str:
     return text.replace("|", "\\|")
 
 
-def _mermaid_label_escape(text: str) -> str:
-    """Escape characters that confuse mermaid node-label parsers.
-
-    Mermaid's label parser treats `(`, `)`, `[`, `]` as syntax even inside
-    quoted strings on some renderers (GitHub in particular), which produces
-    an empty canvas. HTML entities render correctly everywhere.
-    """
-    return (
-        text.replace("(", "&#40;")
-            .replace(")", "&#41;")
-            .replace("[", "&#91;")
-            .replace("]", "&#93;")
-            .replace('"', "&quot;")
-    )
-
-
 def _do_report(arg: str, state: State, out: TextIO) -> None:
     name = arg.strip()
     if not name:
@@ -352,17 +336,17 @@ def _do_report(arg: str, state: State, out: TextIO) -> None:
 
         lines.append("## Deduction graph")
         lines.append("")
-        lines.append("Each node is one entry. An arrow `[a] --> [b]` means `[b]` cites `[a]` as a source.")
-        lines.append("Definitions are drawn with rounded corners; equations with rectangles.")
+        lines.append("Each node is labelled with its entry index — cross-reference the table above for the statement.")
+        lines.append("An arrow `na --> nb` means entry `b` cites entry `a` as a source.")
+        lines.append("Definitions are drawn as stadiums; equations as rectangles.")
         lines.append("")
         lines.append("```mermaid")
         lines.append("graph TD")
         for i, e in enumerate(state.entries):
-            label = _mermaid_label_escape(f"[{i}] {pretty_entry(e.content)}")
             if isinstance(e.content, Definition):
-                lines.append(f'    n{i}(["{label}"])')
+                lines.append(f"    n{i}([{i}])")
             else:
-                lines.append(f'    n{i}["{label}"]')
+                lines.append(f"    n{i}[{i}]")
         for i, e in enumerate(state.entries):
             for s in e.sources:
                 if 0 <= s < len(state.entries):

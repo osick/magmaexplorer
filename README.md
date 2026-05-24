@@ -416,9 +416,9 @@ Notes:
 Writes `<name>.md`, a self-contained markdown file with **two parts**:
 
 1. A markdown **table** listing every entry — `#`, `Kind`, `Statement`, `Sources`, `Steps` (multi-line cells use `<br>`).
-2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node; an arrow `na --> nb` means `[b]` cites `[a]` as a source. Equations are rectangles (`n0["..."]`); definitions are stadiums with rounded corners (`n1(["..."])`). Standalone axioms appear as isolated nodes with no incoming edges.
+2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node labelled with just its **bare index** (`0`, `1`, `2`, …); cross-reference the table for the actual statement. An arrow `na --> nb` means entry `b` cites entry `a` as a source. Equations are rectangles (`n0[0]`); definitions are stadiums (`n1([1])`). Standalone axioms appear as isolated nodes with no incoming edges.
 
-Special characters inside node labels (`(`, `)`, `[`, `]`, `"`) are HTML-escaped to `&#40;`, `&#41;`, `&#91;`, `&#93;`, `&quot;`. This is required because strict mermaid renderers (notably GitHub's) refuse to render labels containing raw parentheses or square brackets even inside quoted strings — without the escaping, the canvas comes up empty.
+The label is intentionally just the integer index — embedding the equation text in the label produced rendering issues across viewers (strict mermaid parsers either rejected raw parens/brackets entirely, leaving the canvas empty, or displayed HTML-escaped entities literally). Plain integer labels render reliably in every mermaid viewer.
 
 Open the resulting `.md` in any mermaid-aware viewer: GitHub or GitLab (renders inline), VS Code with the *Markdown Preview Mermaid Support* extension, Obsidian, or `mmdc` / `mermaid-cli` to render to SVG/PNG.
 
@@ -442,10 +442,10 @@ _4 entries_
 
 ```mermaid
 graph TD
-    n0["&#91;0&#93; x*y = y*&#40;x*x&#41;"]
-    n1(["&#91;1&#93; p := x*x"])
-    n2["&#91;2&#93; y*&#40;x*x&#41; = x*y"]
-    n3["&#91;3&#93; x*p = p*&#40;x*x&#41;"]
+    n0[0]
+    n1([1])
+    n2[2]
+    n3[3]
     n0 --> n2
     n0 --> n3
 ```

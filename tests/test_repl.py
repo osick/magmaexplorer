@@ -723,10 +723,12 @@ def test_report_definition_uses_different_node_shape(tmp_path, monkeypatch):
         "/quit",
     ])
     text = (tmp_path / "mix.md").read_text()
-    # Equation node uses square brackets, definition uses rounded
-    # n0["..."] for equation, n1(["..."]) for definition
-    assert 'n0["' in text
-    assert 'n1(["' in text
+    mermaid = text.split("```mermaid", 1)[1].split("```", 1)[0]
+    # Equation node uses square-bracket shape; definition uses stadium.
+    # Labels are bare indices (no equation text), so the renderer never sees
+    # problematic characters like raw parens or quotes.
+    assert "n0[0]" in mermaid
+    assert "n1([1])" in mermaid
 
 
 def test_report_handles_empty_list(tmp_path, monkeypatch):
@@ -761,32 +763,36 @@ def test_report_help_includes_command():
     assert "/report" in output
 
 
-def test_report_mermaid_escapes_special_chars_in_labels(tmp_path, monkeypatch):
-    """Mermaid renderers (GitHub, etc.) refuse to render labels with raw
-    parens or square brackets even inside quoted strings. We must HTML-escape
-    them or the canvas comes up empty."""
+def test_report_mermaid_labels_are_bare_indices(tmp_path, monkeypatch):
+    """Node labels must be plain integers — no equation text, no HTML
+    entities, no quotes, no parens, no square brackets in the label content.
+
+    Earlier versions embedded the equation in the label and HTML-escaped the
+    problematic characters, but several mermaid renderers either refuse to
+    render labels with brackets/parens at all (empty canvas) or display the
+    entities literally (e.g. `&[0&]`). Bare-index labels work everywhere; the
+    accompanying table provides the human-readable details.
+    """
     monkeypatch.chdir(tmp_path)
     _run([
-        "x*y = y*(x*x)",   # contains both ( and )
-        "/report esc",
+        "x*y = y*(x*x)",   # contains chars that would have needed escaping
+        "/report clean",
         "/quit",
     ])
-    text = (tmp_path / "esc.md").read_text()
+    text = (tmp_path / "clean.md").read_text()
     mermaid = text.split("```mermaid", 1)[1].split("```", 1)[0]
-    # HTML entities present
-    assert "&#40;" in mermaid  # (
-    assert "&#41;" in mermaid  # )
-    assert "&#91;" in mermaid  # [
-    assert "&#93;" in mermaid  # ]
-    # No raw paren/bracket inside the mermaid block for an equation-only input
-    # (definitions would add `(["..."])` syntax — see separate test)
-    assert "(" not in mermaid
-    assert ")" not in mermaid
+    # No HTML entities leak into the diagram any more.
+    assert "&#" not in mermaid
+    assert "&quot;" not in mermaid
+    # No quote characters at all inside the label area.
+    assert '"' not in mermaid
+    # Equation index 0 rendered as a rectangle with a bare integer label.
+    assert "n0[0]" in mermaid
 
 
-def test_report_mermaid_definition_shape_still_present(tmp_path, monkeypatch):
-    """With a definition the stadium shape `(["..."])` must remain — only
-    the LABEL contents get escaped, not the surrounding mermaid syntax."""
+def test_report_mermaid_definition_uses_stadium_with_bare_index(tmp_path, monkeypatch):
+    """A definition is still drawn with a distinct shape (stadium), but the
+    label is still just the index — no leaked entities or special chars."""
     monkeypatch.chdir(tmp_path)
     _run([
         "u := x*x",
@@ -795,10 +801,10 @@ def test_report_mermaid_definition_shape_still_present(tmp_path, monkeypatch):
     ])
     text = (tmp_path / "d.md").read_text()
     mermaid = text.split("```mermaid", 1)[1].split("```", 1)[0]
-    # Stadium shape still intact
-    assert 'n0(["' in mermaid and '"])' in mermaid
-    # The label brackets are escaped though
-    assert "&#91;0&#93;" in mermaid
+    # Stadium shape with bare-index label.
+    assert "n0([0])" in mermaid
+    # No leftover HTML entities.
+    assert "&#" not in mermaid
 
 
 # ---------------------------------------------------------------------------
