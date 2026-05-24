@@ -12,6 +12,7 @@ dependencies = [
     "anthropic",
     "prompt_toolkit",
     "rich",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

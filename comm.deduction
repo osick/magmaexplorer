@@ -1,0 +1,43 @@
+from: 0
+to: 7
+entries:
+- index: 0
+  kind: equation
+  statement: x*y = y*(x*x)
+  sources: []
+  steps: []
+- index: 1
+  kind: equation
+  statement: x*(y*y) = y*y*(x*x)
+  sources:
+  - 0
+  steps:
+  - instantiate y:=y*y in [0] -> x*(y*y) = (y*y)*(x*x)
+- index: 4
+  kind: equation
+  statement: x*y = x*(y*y)
+  sources:
+  - 0
+  - 1
+  steps:
+  - instantiate x:=y, y:=x*x in [0] -> y*(x*x) = (x*x)*(y*y)
+  - 'using [0]: x*y = y*(x*x), so x*y = (x*x)*(y*y)'
+  - 'using [1] backwards: (x*x)*(y*y) = x*(y*y), hence x*y = x*(y*y)'
+- index: 5
+  kind: equation
+  statement: y*x = y*(x*x)
+  sources:
+  - 4
+  steps:
+  - instantiate x:=y, y:=x in [4] -> y*x = y*(x*x)
+- index: 7
+  kind: equation
+  statement: x*y = y*x
+  sources:
+  - 0
+  - 5
+  steps:
+  - instantiate x:=y, y:=x in [0] -> y*x = x*(y*y)
+  - note [5] says y*x = y*(x*x); rewrite x*(y*y) via [4] x*y = x*(y*y) backwards then
+    via [0]
+  - combine [0] x*y = y*(x*x) and [5] y*x = y*(x*x) -> x*y = y*x

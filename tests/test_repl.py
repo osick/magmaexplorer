@@ -263,7 +263,8 @@ def test_save_load_preserves_sources_and_steps(tmp_path):
     data = _json.loads(path.read_text())
     assert len(data) == 2
     assert data[1]["sources"] == [0]
-    assert data[1]["steps"] == ["symm"]
+    # "symm" is not a DSL step, so it gets annotated with "? " prefix on save
+    assert data[1]["steps"] == ["? symm"]
     assert data[0]["sources"] == []
     assert data[0]["steps"] == []
 
@@ -486,7 +487,11 @@ def test_clear_confirmation_shows_dependent_count():
 # --- steps as numbered list ---
 
 def test_add_echo_shows_numbered_steps():
-    """Per-add line for an LLM-derived entry shows steps on separate numbered lines."""
+    """Per-add line for an LLM-derived entry shows steps on separate numbered lines.
+
+    The steps are plain-English (not DSL), so the verifier annotates them with '? '.
+    The numbering format still wraps each annotated step.
+    """
     def fake_llm(eqs, cmd):
         return LLMResult(
             equation="y*x = x*y",
@@ -495,9 +500,10 @@ def test_add_echo_shows_numbered_steps():
         )
 
     output = _run(["x*y = y*x", "derive", "/quit"], llm=fake_llm)
-    assert "1. instantiate x:=y in [0]" in output
-    assert "2. rewrite by [0] backwards" in output
-    assert "3. simplify" in output
+    # Steps are not valid DSL so annotated with "? "; check the annotated text appears numbered
+    assert "1. ? instantiate x:=y in [0]" in output
+    assert "2. ? rewrite by [0] backwards" in output
+    assert "3. ? simplify" in output
 
 
 def test_list_table_renders_steps_one_per_line():
@@ -524,9 +530,10 @@ def test_save_load_round_trips_steps(tmp_path):
     _run(["x*y = y*x", "derive", f"/save {path}", "/quit"], llm=fake_llm)
     import json as _json
     data = _json.loads(path.read_text())
-    assert data[1]["steps"] == ["s1", "s2"]
+    # "s1" and "s2" are not DSL primitives, so annotated with "? " prefix on save
+    assert data[1]["steps"] == ["? s1", "? s2"]
 
-    # Reload in a fresh REPL and confirm the steps survive into the list.
+    # Reload in a fresh REPL and confirm the annotated steps survive into the list.
     out2 = io.StringIO()
     inputs = iter([f"/load {path}", "/list", "/quit"])
     run_repl(read_input=lambda: next(inputs), llm=lambda e, c: None, out=out2)
@@ -544,3 +551,347 @@ def test_load_legacy_justification_format(tmp_path):
     )
     output = _run([f"/load {path}", "/list", "/quit"])
     assert "legacy line" in output
+
+
+# --- /deduction <from> <to> <name> ---
+
+def test_deduction_exports_chain_to_yaml(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seq = iter([
+        LLMResult(equation="y*x = x*y", steps=["s1"], sources=[0]),  # [1] from [0]
+        LLMResult(equation="z*z = z", steps=["s2"], sources=[1]),    # [2] from [1]
+    ])
+    _run([
+        "x*y = y*x",
+        "step1",
+        "step2",
+        "/deduction 0 2 myproof",
+        "/quit",
+    ], llm=lambda eqs, cmd: next(seq))
+
+    import yaml
+    path = tmp_path / "myproof.deduction"
+    assert path.exists()
+    doc = yaml.safe_load(path.read_text())
+    assert doc["from"] == 0
+    assert doc["to"] == 2
+    assert len(doc["entries"]) == 3
+    by_idx = {e["index"]: e for e in doc["entries"]}
+    assert by_idx[0]["statement"] == "x*y = y*x"
+    assert by_idx[0]["sources"] == []
+    assert by_idx[2]["sources"] == [1]
+    # "s2" is not a DSL primitive, so it gets annotated with "? " prefix
+    assert by_idx[2]["steps"] == ["? s2"]
+
+
+def test_deduction_excludes_entries_not_on_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seq = iter([
+        LLMResult(equation="y*x = x*y", steps=["s1"], sources=[0]),  # [1] from [0]
+        LLMResult(equation="z*z = z", steps=["s2"], sources=[1]),    # [3] from [1]
+    ])
+    _run([
+        "x*y = y*x",     # [0]
+        "step1",         # [1] from [0]
+        "a*a = a",       # [2] independent axiom
+        "step2",         # [3] from [1]
+        "/deduction 0 3 proof",
+        "/quit",
+    ], llm=lambda eqs, cmd: next(seq))
+
+    import yaml
+    doc = yaml.safe_load((tmp_path / "proof.deduction").read_text())
+    indices = {e["index"] for e in doc["entries"]}
+    assert indices == {0, 1, 3}
+
+
+def test_deduction_from_equals_to(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",
+        "/deduction 0 0 single",
+        "/quit",
+    ])
+    import yaml
+    doc = yaml.safe_load((tmp_path / "single.deduction").read_text())
+    assert doc["from"] == 0 and doc["to"] == 0
+    assert len(doc["entries"]) == 1
+    assert doc["entries"][0]["statement"] == "x*y = y*x"
+
+
+def test_deduction_includes_definition_cited_as_source(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def llm(eqs, cmd):
+        return LLMResult(equation="y*x = x*y", steps=["uses u"], sources=[0, 1])
+
+    _run([
+        "x*y = y*x",   # [0]
+        "u := x*x",    # [1] definition
+        "use u",       # [2] from [0, 1]
+        "/deduction 0 2 d",
+        "/quit",
+    ], llm=llm)
+
+    import yaml
+    doc = yaml.safe_load((tmp_path / "d.deduction").read_text())
+    by_idx = {e["index"]: e for e in doc["entries"]}
+    assert by_idx[1]["kind"] == "definition"
+    assert by_idx[1]["name"] == "u"
+    assert by_idx[1]["body"] == "x*x"
+
+
+def test_deduction_to_not_derived_from_from_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    output = _run([
+        "x*y = y*x",
+        "a*a = a",
+        "/deduction 0 1 proof",
+        "/quit",
+    ])
+    assert "not derived" in output.lower()
+    assert not (tmp_path / "proof.deduction").exists()
+
+
+def test_deduction_wrong_arg_count():
+    output = _run(["x*y = y*x", "/deduction 0", "/quit"])
+    assert "usage" in output.lower()
+
+
+def test_deduction_index_out_of_range():
+    output = _run(["x*y = y*x", "/deduction 0 5 p", "/quit"])
+    assert "out of range" in output.lower()
+
+
+def test_deduction_non_numeric_index():
+    output = _run(["x*y = y*x", "/deduction abc 0 p", "/quit"])
+    assert "invalid" in output.lower()
+
+
+def test_help_includes_deduction():
+    output = _run(["/help", "/quit"])
+    assert "/deduction" in output
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: DSL slash commands  /sym /inst /trans /rewrite /expand /fold
+# ---------------------------------------------------------------------------
+
+def test_sym_basic():
+    """Test 1: /sym 0 on x*y=y*x produces [1] y*x=x*y, sources=[0], steps=['sym [0]']."""
+    output = _run(["x*y = y*x", "/sym 0", "/quit"])
+    assert "[1] y*x = x*y" in output
+
+
+def test_sym_out_of_range():
+    """Test 2: /sym 5 with only one entry prints DSLError, list unchanged."""
+    output = _run(["x*y = y*x", "/sym 5", "/list", "/quit"])
+    assert "out of range" in output.lower() or "error" in output.lower()
+    # Only one entry should be in the list
+    assert "[1]" not in output.split("/list")[1] if "/list" in output else "[1]" not in output
+
+
+def test_sym_no_arg():
+    """Test 3: /sym with no arg triggers DSLError; list unchanged."""
+    output = _run(["x*y = y*x", "/sym", "/list", "/quit"])
+    # Should print an error message
+    assert "error" in output.lower() or "expects" in output.lower() or "invalid" in output.lower()
+    # List should still have exactly one entry
+    assert "[1]" not in output
+
+
+def test_inst_basic():
+    """Test 4: /inst 0 x:=y, y:=x on x=y*(x*x) produces y=x*(y*y)."""
+    output = _run(["x = y*(x*x)", "/inst 0 x:=y, y:=x", "/quit"])
+    assert "[1]" in output
+    assert "y = x*(y*y)" in output
+
+
+def test_inst_single_var():
+    """Test 5: /inst 0 x:=y swaps just one var."""
+    output = _run(["x*y = y*x", "/inst 0 x:=y", "/quit"])
+    assert "[1]" in output
+    assert "y*y = y*y" in output
+
+
+def test_inst_bad_subst():
+    """Test 6: /inst 0 garble produces DSLError, list unchanged."""
+    output = _run(["x*y = y*x", "/inst 0 garble", "/list", "/quit"])
+    assert "error" in output.lower() or "invalid" in output.lower()
+    assert "[1]" not in output
+
+
+def test_trans_basic():
+    """Test 7: /trans 0 1 from a=b and b=c produces a=c, sources=[0,1]."""
+    output = _run(["a = b", "b = c", "/trans 0 1", "/quit"])
+    assert "[2]" in output
+    assert "a = c" in output
+
+
+def test_trans_no_shared_term():
+    """Test 8: /trans 0 1 with no shared term prints error, list unchanged."""
+    output = _run(["a = b", "c = d", "/trans 0 1", "/list", "/quit"])
+    assert "error" in output.lower() or "shared" in output.lower() or "no shared" in output.lower()
+    assert "[2]" not in output
+
+
+def test_rewrite_basic():
+    """Test 9: /rewrite 1 using 0 — basic case."""
+    # [0] x = a (rule: x -> a), [1] x*x = x  -> rewrite leftmost x using [0] -> a*x = x
+    output = _run(["x = a", "x*x = x", "/rewrite 1 using 0", "/quit"])
+    assert "[2]" in output
+    # x in [1] lhs gets rewritten to a using rule x=a forward
+    assert "a*x = x" in output
+
+
+def test_rewrite_backwards():
+    """Test 10: /rewrite 1 using 0 backwards — uses rule rhs->lhs."""
+    # [0] x = a, [1] a*a = a -> rewrite backwards means a -> x
+    output = _run(["x = a", "a*a = a", "/rewrite 1 using 0 backwards", "/quit"])
+    assert "[2]" in output
+    # rewriting a->x in a*a=a, leftmost a -> x*a=a
+    assert "x*a = a" in output
+
+
+def test_expand_basic():
+    """Test 11: /expand 1 0 where [0] is a definition and [1] uses the def-name."""
+    # [0]: u := x*x  (definition), [1]: u = u*u (equation using u)
+    # expand [1] using [0]: replace u -> x*x (leftmost)
+    output = _run(["u := x*x", "u = u*u", "/expand 1 0", "/quit"])
+    assert "[2]" in output
+    assert "x*x = u*u" in output
+
+
+def test_expand_not_a_definition():
+    """Test 12: /expand 1 0 where [0] is NOT a definition prints error."""
+    output = _run(["x*y = y*x", "a*a = a", "/expand 1 0", "/list", "/quit"])
+    assert "error" in output.lower() or "definition" in output.lower()
+    assert "[2]" not in output
+
+
+def test_fold_basic():
+    """Test 13: /fold 1 0 — inverse of expand."""
+    # [0]: u := x*x  (definition), [1]: x*x = x*x*x (equation)
+    # fold [1] using [0]: replace x*x -> u (leftmost)
+    output = _run(["u := x*x", "x*x = x*x*x", "/fold 1 0", "/quit"])
+    assert "[2]" in output
+    assert "u = x*x*x" in output or "u =" in output
+
+
+def test_dsl_entry_saved_step_is_canonical(tmp_path):
+    """Test 14: After /sym 0, entry's steps list contains canonical 'sym [0]'."""
+    path = tmp_path / "m.json"
+    _run(["x*y = y*x", "/sym 0", f"/save {path}", "/quit"])
+    import json as _json
+    data = _json.loads(path.read_text())
+    assert len(data) == 2
+    assert data[1]["steps"] == ["sym [0]"]
+    assert data[1]["sources"] == [0]
+
+
+def test_help_includes_dsl_commands():
+    """Test 15: /help includes /sym, /inst, /trans, /rewrite, /expand, /fold."""
+    output = _run(["/help", "/quit"])
+    assert "/sym" in output
+    assert "/inst" in output
+    assert "/trans" in output
+    assert "/rewrite" in output
+    assert "/expand" in output
+    assert "/fold" in output
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: LLM step verifier and SYSTEM_PROMPT DSL grammar
+# ---------------------------------------------------------------------------
+
+
+def test_llm_steps_all_verified_marks_with_check():
+    """Test P3-1: LLM emits a valid DSL step; output annotated with checkmark and [verified]."""
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="y*x = x*y", sources=[0], steps=["sym [0]"])
+
+    output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
+    assert "✓ sym [0]" in output
+    assert "[verified]" in output
+
+
+def test_llm_unparseable_step_marked_with_question():
+    """Test P3-2: LLM emits a step that doesn't parse; output annotated with '?' and [unverified]."""
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="y*x = x*y", sources=[0], steps=["this is not DSL"])
+
+    output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
+    assert "? this is not DSL" in output
+    assert "[unverified]" in output
+
+
+def test_llm_failing_step_marked_with_cross():
+    """Test P3-3: LLM emits a step that parses but fails at execution (out of range); annotated ✗, [unverified]."""
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="y*x = x*y", sources=[0], steps=["sym [99]"])
+
+    output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
+    assert "✗ sym [99]" in output
+    assert "[unverified]" in output
+
+
+def test_llm_chain_final_mismatch_marked_unverified():
+    """Test P3-4: LLM step executes cleanly but final result != claimed equation; last step marked ✗, [unverified]."""
+    # [0] x*y = y*x; sym [0] -> y*x = x*y, but claim is z=z  -> mismatch
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="z = z", sources=[0], steps=["sym [0]"])
+
+    output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
+    # The last step was ✓ until mismatch detected, then replaced with ✗
+    assert "✗ sym [0]" in output
+    assert "≠" in output or "!=" in output or "claim" in output.lower()
+    assert "[unverified]" in output
+
+
+def test_llm_multi_step_chain_uses_s_refs():
+    """Test P3-5: Multi-step chain with s-references; all ✓ and overall [verified]."""
+    # [0] x = a*b
+    # steps: ["sym [0]", "sym s1"]
+    # sym [0] -> a*b = x  (s1)
+    # sym s1  -> x = a*b  (s2) — matches claim "x = a*b"
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="x = a*b", sources=[0], steps=["sym [0]", "sym s1"])
+
+    output = _run(["x = a*b", "go", "/quit"], llm=fake_llm)
+    assert "✓ sym [0]" in output
+    assert "✓ sym s1" in output
+    assert "[verified]" in output
+
+
+def test_system_prompt_includes_dsl_grammar():
+    """Test P3-6: SYSTEM_PROMPT references all six primitives and step reference notation."""
+    from magmaexplorer.llm import SYSTEM_PROMPT
+    for primitive in ("sym", "inst", "trans", "rewrite", "expand", "fold"):
+        assert primitive in SYSTEM_PROMPT, f"SYSTEM_PROMPT missing primitive: {primitive!r}"
+    # Should document the s<k> / s1 notation for prior step references
+    assert "s1" in SYSTEM_PROMPT or "s<k>" in SYSTEM_PROMPT, (
+        "SYSTEM_PROMPT should mention step-reference notation (s1 or s<k>)"
+    )
+
+
+def test_verified_label_appears_below_steps():
+    """Test P3-7: [verified] line appears after the last numbered step line."""
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="y*x = x*y", sources=[0], steps=["sym [0]"])
+
+    output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
+    # Find positions: step line should precede [verified] line
+    step_pos = output.find("✓ sym [0]")
+    verified_pos = output.find("[verified]")
+    assert step_pos != -1, "step annotation not found"
+    assert verified_pos != -1, "[verified] not found"
+    assert step_pos < verified_pos, "[verified] must appear AFTER the step line"
+
+
+def test_unverified_appears_when_no_steps_returned():
+    """Test P3-8: LLM returns empty steps list; output shows [unverified]."""
+    def fake_llm(eqs, cmd):
+        return LLMResult(equation="y*x = x*y", sources=[0], steps=[])
+
+    output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
+    assert "[unverified]" in output

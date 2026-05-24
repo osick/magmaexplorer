@@ -149,3 +149,45 @@ def pretty_entry(item: Equation | Definition) -> str:
     if isinstance(item, Definition):
         return pretty_definition(item)
     return pretty_equation(item)
+
+
+def substitute(term: Term, mapping: dict[str, Term]) -> Term:
+    """Simultaneous variable substitution.
+
+    Every Var(name) where name is in mapping gets replaced atomically by
+    mapping[name]; recurses into Op children.  Simultaneous (not iterated):
+    ``{"x": Var("y"), "y": Var("x")}`` swaps x and y.
+    """
+    if isinstance(term, Var):
+        return mapping.get(term.name, term)
+    # Op — recurse into both children
+    new_left = substitute(term.left, mapping)
+    new_right = substitute(term.right, mapping)
+    if new_left is term.left and new_right is term.right:
+        return term  # no change — return same object for identity check
+    return Op(new_left, new_right)
+
+
+def rewrite_term(term: Term, pattern: Term, replacement: Term) -> Term | None:
+    """Find the leftmost-outermost occurrence of *pattern* inside *term* and
+    replace it with *replacement*.
+
+    Returns the modified term, or ``None`` if *pattern* does not occur anywhere.
+
+    "Outermost" is checked first (the whole term); then we recurse into the
+    left child before the right child.
+    """
+    # Check outermost first
+    if term == pattern:
+        return replacement
+    # Not a match at this level — recurse only into Op nodes
+    if isinstance(term, Op):
+        # Try left child first (leftmost)
+        new_left = rewrite_term(term.left, pattern, replacement)
+        if new_left is not None:
+            return Op(new_left, term.right)
+        # Try right child
+        new_right = rewrite_term(term.right, pattern, replacement)
+        if new_right is not None:
+            return Op(term.left, new_right)
+    return None

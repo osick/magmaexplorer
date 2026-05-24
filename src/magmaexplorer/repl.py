@@ -15,6 +15,8 @@ from typing import Callable, TextIO, Union
 from rich.console import Console
 from rich.table import Table
 
+from . import dsl as _dsl
+from .dsl import DSLError, EntryRef
 from .llm import LLMError, LLMResult, call_llm, critique_entry, format_user_message
 from .term import (
     Definition,
@@ -24,6 +26,7 @@ from .term import (
     parse_entry,
     pretty,
     pretty_entry,
+    pretty_equation,
 )
 
 Item = Union[Equation, Definition]
@@ -231,6 +234,68 @@ def _do_clear(arg: str, state: State, out: TextIO, read_input: InputReader) -> N
     out.write(f"deleted {len(doomed)} {noun}.\n")
 
 
+def _compute_ancestors(entries: list[Entry], i: int) -> set[int]:
+    """Indices in i's transitive source chain (including i)."""
+    seen: set[int] = set()
+    stack = [i]
+    while stack:
+        cur = stack.pop()
+        if cur in seen or not (0 <= cur < len(entries)):
+            continue
+        seen.add(cur)
+        stack.extend(entries[cur].sources)
+    return seen
+
+
+def _entry_to_yaml_row(idx: int, e: Entry) -> dict:
+    row: dict = {"index": idx, "kind": _kind(e.content)}
+    if isinstance(e.content, Definition):
+        row["name"] = e.content.name
+        row["body"] = pretty(e.content.body)
+    else:
+        row["statement"] = pretty_entry(e.content)
+    row["sources"] = list(e.sources)
+    row["steps"] = list(e.steps)
+    return row
+
+
+def _do_deduction(arg: str, state: State, out: TextIO) -> None:
+    parts = arg.split()
+    if len(parts) != 3:
+        out.write("usage: /deduction <from> <to> <name>\n")
+        return
+    try:
+        i_from = int(parts[0])
+        i_to = int(parts[1])
+    except ValueError:
+        out.write(f"invalid index: {parts[0]!r} or {parts[1]!r}\n")
+        return
+    name = parts[2]
+    n = len(state.entries)
+    for label, idx in (("from", i_from), ("to", i_to)):
+        if not (0 <= idx < n):
+            out.write(f"{label} index out of range: {idx}\n")
+            return
+
+    ancestors = _compute_ancestors(state.entries, i_to)
+    if i_from not in ancestors:
+        out.write(f"[{i_to}] is not derived from [{i_from}]\n")
+        return
+
+    rows = [_entry_to_yaml_row(idx, state.entries[idx]) for idx in sorted(ancestors)]
+    doc = {"from": i_from, "to": i_to, "entries": rows}
+
+    path = f"{name}.deduction"
+    try:
+        import yaml
+        with open(path, "w") as f:
+            yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False)
+    except OSError as exc:
+        out.write(f"write failed: {exc}\n")
+        return
+    out.write(f"deduction written to {path} ({len(ancestors)} entries)\n")
+
+
 def _do_verify(arg: str, state: State, critic: CriticCallable, out: TextIO) -> None:
     if not arg:
         out.write("usage: /verify <index>\n")
@@ -273,6 +338,9 @@ _HELP_TEXT = """commands:
   <var>:=<term>     add a definition (a syntactic abbreviation)
   /list             show the numbered list (tabular)
   /verify <i>       ask a fresh LLM critic to re-check entry i's derivation
+  /deduction <from> <to> <name>
+                    export the proof subtree from <from> to <to> as a
+                    structured YAML file <name>.deduction
   /clear            empty the entire list (asks for confirmation)
   /clear <i>        delete entry i and every entry derived from it (cascading)
   /save <path>      write list to a JSON file
@@ -281,7 +349,103 @@ _HELP_TEXT = """commands:
   /help             this message
   /quit             exit (Ctrl-D also works)
 anything else is sent to the LLM as a derivation command.
+
+derivation primitives (each adds a verified entry):
+  /sym <i>                             swap [i]'s sides
+  /inst <i> x:=t [, y:=u ...]          substitute variables in [i]
+  /trans <i> <j>                       transitivity, auto-detects shared side
+  /rewrite <i> using <j> [backwards]   rewrite one subterm in [i] using [j] as a rule
+  /expand <i> <d>                      replace <d>.name by <d>.body in [i]
+  /fold <i> <d>                        replace <d>.body by <d>.name in [i]
 """
+
+
+def _entry_source_indices(step: "_dsl.Step") -> list[int]:
+    """Collect EntryRef indices from any ref-typed field of `step`, in
+    declaration order. Returns [] if there are none (e.g. all StepRef)."""
+    refs: list[int] = []
+    if isinstance(step, _dsl.Sym):
+        if isinstance(step.target, EntryRef):
+            refs.append(step.target.index)
+    elif isinstance(step, _dsl.Inst):
+        if isinstance(step.target, EntryRef):
+            refs.append(step.target.index)
+    elif isinstance(step, _dsl.Trans):
+        if isinstance(step.left, EntryRef):
+            refs.append(step.left.index)
+        if isinstance(step.right, EntryRef):
+            refs.append(step.right.index)
+    elif isinstance(step, _dsl.Rewrite):
+        if isinstance(step.target, EntryRef):
+            refs.append(step.target.index)
+        if isinstance(step.rule, EntryRef):
+            refs.append(step.rule.index)
+    elif isinstance(step, (_dsl.Expand, _dsl.Fold)):
+        if isinstance(step.target, EntryRef):
+            refs.append(step.target.index)
+        if isinstance(step.definition, EntryRef):
+            refs.append(step.definition.index)
+    return refs
+
+
+def _args_to_dsl(primitive: str, arg: str) -> str:
+    """Wrap bare integer index tokens in [...] to form a full DSL step string.
+
+    Rules:
+      sym  <i>                        -> sym [i]
+      inst <i> rest...                -> inst [i] rest...
+      trans <i> <j>                   -> trans [i] [j]
+      rewrite <i> using <j> [bkwd]    -> rewrite [i] using [j] [bkwd]
+      expand <i> <j>                  -> expand [i] [j]
+      fold  <i> <j>                   -> fold [i] [j]
+    """
+    tokens = arg.split()
+
+    def _wrap(tok: str) -> str:
+        return f"[{tok}]" if tok.lstrip("-").isdigit() else tok
+
+    if primitive in ("sym", "inst"):
+        if tokens:
+            tokens[0] = _wrap(tokens[0])
+    elif primitive in ("trans", "expand", "fold"):
+        if len(tokens) >= 1:
+            tokens[0] = _wrap(tokens[0])
+        if len(tokens) >= 2:
+            tokens[1] = _wrap(tokens[1])
+    elif primitive == "rewrite":
+        # rewrite <i> using <j> [backwards]
+        if len(tokens) >= 1:
+            tokens[0] = _wrap(tokens[0])
+        # find "using" keyword and wrap the token after it
+        for k, tok in enumerate(tokens):
+            if tok == "using" and k + 1 < len(tokens):
+                tokens[k + 1] = _wrap(tokens[k + 1])
+                break
+
+    wrapped_arg = " ".join(tokens)
+    return f"{primitive} {wrapped_arg}".strip()
+
+
+def _handle_dsl(primitive: str, arg: str, state: "State", out: "TextIO") -> None:
+    """Parse-execute-append pipeline for a single DSL primitive slash command."""
+    dsl_str = _args_to_dsl(primitive, arg)
+    try:
+        step = _dsl.parse_step(dsl_str)
+    except DSLError as exc:
+        out.write(f"dsl error: {exc}\n")
+        return
+
+    entries_content = [e.content for e in state.entries]
+    try:
+        result_eq = _dsl.execute_step(step, entries_content, [])
+    except DSLError as exc:
+        out.write(f"dsl error: {exc}\n")
+        return
+
+    sources = _entry_source_indices(step)
+    entry = Entry(content=result_eq, sources=sources, steps=[dsl_str])
+    state.entries.append(entry)
+    out.write(_format_add_line(len(state.entries) - 1, entry) + "\n")
 
 
 def _handle_slash(
@@ -306,15 +470,72 @@ def _handle_slash(
         out.write(f"debug: {'on' if state.debug else 'off'}\n")
     elif cmd == "/verify":
         _do_verify(arg, state, critic, out)
+    elif cmd == "/deduction":
+        _do_deduction(arg, state, out)
     elif cmd == "/clear":
         _do_clear(arg, state, out, read_input)
     elif cmd == "/save":
         out.write("usage: /save <path>\n" if not arg else _do_save(arg, state.entries))
     elif cmd == "/load":
         out.write("usage: /load <path>\n" if not arg else _do_load(arg, state.entries))
+    elif cmd in ("/sym", "/inst", "/trans", "/rewrite", "/expand", "/fold"):
+        _handle_dsl(cmd[1:], arg, state, out)
     else:
         out.write(f"unknown command: {cmd}\n")
     return True
+
+
+def _verify_llm_steps(
+    raw_steps: list[str],
+    entries: list[Item],
+    claim: Equation,
+) -> tuple[list[str], bool]:
+    """Parse and execute each DSL step in order, building a chain via prior_results.
+
+    Returns (annotated_steps, fully_verified):
+      - annotated_steps: same length as raw_steps; each prefixed with ``✓ ``, ``✗ ``, or ``? ``.
+      - fully_verified: True iff EVERY step parsed and executed, AND the final
+        intermediate equals ``claim``. Otherwise False.
+
+    A step that didn't parse or didn't execute is treated as a "gap" — subsequent
+    steps may still parse and execute against prior_results (no fabricated entry
+    is added for the gap). The chain is considered NOT fully_verified if any gap
+    exists OR if the final prior_results[-1] != claim.
+    """
+    annotated: list[str] = []
+    prior_results: list[Equation] = []
+    has_gap = False
+
+    for raw in raw_steps:
+        try:
+            step = _dsl.parse_step(raw)
+        except DSLError:
+            annotated.append(f"? {raw}")
+            has_gap = True
+            continue
+        try:
+            result_eq = _dsl.execute_step(step, entries, prior_results)
+        except DSLError as exc:
+            annotated.append(f"✗ {raw}   [{exc}]")
+            has_gap = True
+            continue
+        annotated.append(f"✓ {raw}")
+        prior_results.append(result_eq)
+
+    if has_gap or not prior_results:
+        return annotated, False
+
+    if prior_results[-1] != claim:
+        # Replace the last ✓ with an explanatory ✗.
+        last_raw = raw_steps[-1]
+        annotated[-1] = (
+            f"✗ {last_raw}   "
+            f"[final {pretty_equation(prior_results[-1])} ≠ claim "
+            f"{pretty_equation(claim)}]"
+        )
+        return annotated, False
+
+    return annotated, True
 
 
 def _handle_line(
@@ -363,13 +584,23 @@ def _handle_line(
         out.write(f"llm returned unparseable equation {result.equation!r}: {exc}\n")
         return True
 
+    items_view: list[Item] = [e.content for e in state.entries]
+    if isinstance(new_content, Equation):
+        annotated_steps, verified = _verify_llm_steps(
+            list(result.steps), items_view, new_content
+        )
+    else:
+        # LLM returned a definition — skip chain verification
+        annotated_steps, verified = list(result.steps), False
+
     entry = Entry(
         content=new_content,
         sources=list(result.sources),
-        steps=list(result.steps),
+        steps=annotated_steps,
     )
     state.entries.append(entry)
     out.write(_format_add_line(len(state.entries) - 1, entry) + "\n")
+    out.write(f"    [{'verified' if verified else 'unverified'}]\n")
     return True
 
 
