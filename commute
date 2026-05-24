@@ -1,0 +1,124 @@
+[
+  {
+    "kind": "equation",
+    "lhs": "x*y",
+    "rhs": "y*(x*x)",
+    "sources": [],
+    "steps": []
+  },
+  {
+    "kind": "equation",
+    "lhs": "y*(x*x)",
+    "rhs": "x*x*(y*y)",
+    "sources": [
+      0
+    ],
+    "steps": [
+      "inst [0] x:=y, y:=x*x"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "x*y",
+    "rhs": "x*x*(y*y)",
+    "sources": [
+      1,
+      0
+    ],
+    "steps": [
+      "rewrite [1] using [0] backwards"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "y*(x*x)",
+    "rhs": "y*y*(x*x*(x*x))",
+    "sources": [
+      2
+    ],
+    "steps": [
+      "inst [2] y:=x*x, x:=y"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "x*x",
+    "rhs": "x*x*(x*x)",
+    "sources": [
+      2
+    ],
+    "steps": [
+      "inst [2] y:=x"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "y*(x*x)",
+    "rhs": "y*y*(x*x)",
+    "sources": [
+      3,
+      4
+    ],
+    "steps": [
+      "rewrite [3] using [4] backwards"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "y*y*(x*x)",
+    "rhs": "x*y",
+    "sources": [
+      5,
+      0
+    ],
+    "steps": [
+      "trans [5] [0]"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "y*y*(x*x)",
+    "rhs": "x*y",
+    "sources": [
+      5,
+      0
+    ],
+    "steps": [
+      "trans [5] [0]"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "x*x*(y*y)",
+    "rhs": "y*x",
+    "sources": [
+      6
+    ],
+    "steps": [
+      "inst [6] x:=y, y:=x"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "x*y",
+    "rhs": "y*y*(x*x)",
+    "sources": [
+      7
+    ],
+    "steps": [
+      "sym [7]"
+    ]
+  },
+  {
+    "kind": "equation",
+    "lhs": "y*x",
+    "rhs": "x*y",
+    "sources": [
+      8,
+      2
+    ],
+    "steps": [
+      "trans [8] [2]"
+    ]
+  }
+]

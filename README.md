@@ -16,7 +16,7 @@ LLM features (everything involving the Anthropic API) require:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-All other features — direct input, DSL derivation primitives, save/load, `/list`, `/deduction`, `/report` — work without the key.
+All other features — direct input, DSL derivation primitives, save/load, `/list`, `/deduction`, `/report`, `/lean` — work without the key.
 
 
 ## Quickstart
@@ -263,6 +263,12 @@ Export the proof subtree anchored at `[to]` (with `[from]` as a required ancesto
 ```
 Export the **entire current list** as a markdown file `<name>.md` containing a per-entry table and a mermaid diagram of the deduction DAG. See [/report Export](#report-export).
 
+```text
+/lean <name>
+```
+
+Export the entire current list as a Lean 4 script `<name>.lean` (or `<name>` if it already ends in `.lean`). Axiom entries become `axiom` declarations, derived entries become `theorem … := by sorry`, and the DSL steps used to derive each one are recorded in the comment above. See [/lean Export](#lean-export).
+
 
 ## Derivation DSL Spec
 
@@ -416,7 +422,7 @@ Notes:
 Writes `<name>.md`, a self-contained markdown file with **two parts**:
 
 1. A markdown **table** listing every entry — `#`, `Kind`, `Statement`, `Sources`, `Steps` (multi-line cells use `<br>`).
-2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node whose label is the magma equation (or definition) itself, wrapped in mermaid's quoted-string label syntax (`n0["x*y = y*(x*x)"]`). An arrow `na --> nb` means entry `b` cites entry `a` as a source. Equations are rectangles; definitions are stadiums (`n1(["p := x*x"])`). Standalone axioms appear as isolated nodes with no incoming edges.
+2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node whose label is the magma equation (or definition) itself, wrapped in mermaid's quoted-string label syntax (`n0["x*y = y*(x*x)"]`). An arrow `na -->|rule| nb` means entry `b` cites entry `a` as a source; the edge label is the DSL primitive (`sym`, `inst`, `trans`, `rewrite`, `expand`, `fold`) that consumed the source while deriving the target. When multiple primitives in the same derivation reference the same source, the names are comma-separated (`n0 -->|sym, inst| n2`). Edges from LLM-produced steps that don't parse as DSL appear unlabeled. Equations are rectangles; definitions are stadiums (`n1(["p := x*x"])`). Standalone axioms appear as isolated nodes with no incoming edges.
 
 Open the resulting `.md` in any mermaid-aware viewer: GitHub or GitLab (renders inline), VS Code with the *Markdown Preview Mermaid Support* extension, Obsidian, or `mmdc` / `mermaid-cli` to render to SVG/PNG.
 
@@ -444,12 +450,65 @@ graph TD
     n1(["p := x*x"])
     n2["y*(x*x) = x*y"]
     n3["x*p = p*(x*x)"]
-    n0 --> n2
-    n0 --> n3
+    n0 -->|sym| n2
+    n0 -->|inst| n3
 ```
 ````
 
 `/report` is read-only: it does not mutate the list.
+
+
+## /lean Export
+
+```text
+/lean <name>
+```
+
+Writes `<name>.lean` (the `.lean` extension is added automatically if absent). The script is a self-contained Lean 4 starter file you can fill in to produce a formal proof of the derivation chain — for example to submit to the [equational-theories distillation challenge](https://competition.sair.foundation/competitions/mathematics-distillation-challenge-equational-theories-stage2/overview).
+
+The structure of the file:
+
+1. **Preamble** — a header comment explaining the file, followed by `variable {G : Type*} [Mul G]` so each entry can be stated over a generic magma `G`.
+2. **One block per entry**, in order:
+   - **Axiom entries** (no sources, no steps) become `axiom eq_<i> : ∀ <vars> : G, <lhs> = <rhs>` — the equation is asserted as a hypothesis you reason from.
+   - **Derived entries** become `theorem eq_<i> : ∀ <vars> : G, <lhs> = <rhs> := by sorry`, with a comment block above that names the cited sources and lists the DSL steps the REPL used to derive them. The `sorry` is your placeholder — replace it with the actual Lean tactics (the DSL primitives map naturally: `sym` → `Eq.symm`, `trans` → `Eq.trans`, `inst` → specializing a hypothesis, `rewrite` → `rw [...]`, etc.).
+   - **Definitions** appear only as a comment — they are syntactic abbreviations in magmaexplorer with no direct Lean counterpart, so the comment tells you to inline the body wherever the name appears.
+
+Free variables are collected from each equation and quantified at the top of its theorem signature in alphabetical order, so every entry is self-contained.
+
+Example output after `x*y = y*(x*x)`, `p := x*x`, `/sym 0`, `/inst 0 x:=a, y:=b`:
+
+```lean
+-- magmaexplorer export: smoke
+-- 4 entries
+--
+-- Each `axiom` is an input equation (no derivation in the REPL).
+-- Each `theorem` carries a `sorry` placeholder; the comment block above it
+-- records the DSL primitives the magmaexplorer REPL used to derive it.
+-- Fill in the `by ...` blocks to produce a complete Lean proof script for
+-- submission (e.g. to the equational-theories distillation challenge).
+
+variable {G : Type*} [Mul G]
+
+
+-- [0] axiom: x*y = y*(x*x)
+axiom eq_0 : ∀ x y : G, x * y = y * (x * x)
+
+-- [1] definition: p := x*x
+--     (syntactic abbreviation; inline `p` as `x * x` where needed)
+
+-- [2] derived from [0]
+--     1. sym [0]
+theorem eq_2 : ∀ x y : G, y * (x * x) = x * y := by
+  sorry
+
+-- [3] derived from [0]
+--     1. inst [0] x:=a, y:=b
+theorem eq_3 : ∀ a b : G, a * b = b * (a * a) := by
+  sorry
+```
+
+`/lean` is read-only: it does not mutate the list.
 
 
 ## JSON Save Format

@@ -21,6 +21,7 @@ _11 entries_
 ## Deduction graph
 
 Each node shows the entry's magma statement. An arrow `na --> nb` means entry `b` cites entry `a` as a source.
+Edge labels name the DSL primitive(s) that consumed the source while deriving the target.
 Definitions are drawn as stadiums; equations as rectangles.
 
 ```mermaid
@@ -36,19 +37,19 @@ graph TD
     n8["x*x*(y*y) = y*x"]
     n9["x*y = y*y*(x*x)"]
     n10["y*x = x*y"]
-    n0 --> n1
-    n1 --> n2
-    n0 --> n2
-    n2 --> n3
-    n2 --> n4
-    n3 --> n5
-    n4 --> n5
-    n5 --> n6
-    n0 --> n6
-    n5 --> n7
-    n0 --> n7
-    n6 --> n8
-    n7 --> n9
-    n8 --> n10
-    n2 --> n10
+    n0 -->|inst| n1
+    n1 -->|rewrite| n2
+    n0 -->|rewrite| n2
+    n2 -->|inst| n3
+    n2 -->|inst| n4
+    n3 -->|rewrite| n5
+    n4 -->|rewrite| n5
+    n5 -->|trans| n6
+    n0 -->|trans| n6
+    n5 -->|trans| n7
+    n0 -->|trans| n7
+    n6 -->|inst| n8
+    n7 -->|sym| n9
+    n8 -->|trans| n10
+    n2 -->|trans| n10
 ```

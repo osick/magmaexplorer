@@ -301,6 +301,57 @@ def _md_escape(text: str) -> str:
     return text.replace("|", "\\|")
 
 
+_PRIMITIVE_NAME = {
+    _dsl.Sym: "sym",
+    _dsl.Inst: "inst",
+    _dsl.Trans: "trans",
+    _dsl.Rewrite: "rewrite",
+    _dsl.Expand: "expand",
+    _dsl.Fold: "fold",
+}
+
+
+def _strip_verify_prefix(raw: str) -> str:
+    """Strip the ✓/✗/? prefix that LLM-derived steps carry from verification.
+
+    `_verify_llm_steps` annotates each step with `✓ `, `✗ `, or `? ` so the
+    list display can show validity. For DSL re-parsing, those markers must
+    be removed first; otherwise `parse_step("✓ sym [0]")` fails.
+    """
+    for marker in ("✓ ", "✗ ", "? "):
+        if raw.startswith(marker):
+            return raw[len(marker):]
+    return raw
+
+
+def _edge_rule_labels(steps: list[str]) -> dict[int, list[str]]:
+    """For each entry-source index referenced across `steps`, return the
+    ordered list of distinct DSL primitive names that referenced it.
+
+    Steps that don't parse as DSL contribute no labels (the edge remains
+    unlabeled). Steps using only `s<k>` refs (no `[i]`) also contribute none.
+    """
+    result: dict[int, list[str]] = {}
+    for raw in steps:
+        stripped = _strip_verify_prefix(raw)
+        # Cut off any trailing `[...]` annotation appended by the verifier
+        # (e.g. `"✗ inst [0] x:=y   [...explanation]"`).
+        if "   [" in stripped:
+            stripped = stripped.split("   [", 1)[0].rstrip()
+        try:
+            step = _dsl.parse_step(stripped)
+        except DSLError:
+            continue
+        name = _PRIMITIVE_NAME.get(type(step))
+        if name is None:
+            continue
+        for src_idx in _entry_source_indices(step):
+            bucket = result.setdefault(src_idx, [])
+            if name not in bucket:
+                bucket.append(name)
+    return result
+
+
 def _do_report(arg: str, state: State, out: TextIO) -> None:
     name = arg.strip()
     if not name:
@@ -337,6 +388,7 @@ def _do_report(arg: str, state: State, out: TextIO) -> None:
         lines.append("## Deduction graph")
         lines.append("")
         lines.append("Each node shows the entry's magma statement. An arrow `na --> nb` means entry `b` cites entry `a` as a source.")
+        lines.append("Edge labels name the DSL primitive(s) that consumed the source while deriving the target.")
         lines.append("Definitions are drawn as stadiums; equations as rectangles.")
         lines.append("")
         lines.append("```mermaid")
@@ -348,9 +400,15 @@ def _do_report(arg: str, state: State, out: TextIO) -> None:
             else:
                 lines.append(f'    n{i}["{label}"]')
         for i, e in enumerate(state.entries):
+            edge_labels = _edge_rule_labels(e.steps)
             for s in e.sources:
                 if 0 <= s < len(state.entries):
-                    lines.append(f"    n{s} --> n{i}")
+                    primitives = edge_labels.get(s, [])
+                    if primitives:
+                        lbl = ", ".join(primitives)
+                        lines.append(f"    n{s} -->|{lbl}| n{i}")
+                    else:
+                        lines.append(f"    n{s} --> n{i}")
         lines.append("```")
 
     path = f"{name}.md"
@@ -361,6 +419,100 @@ def _do_report(arg: str, state: State, out: TextIO) -> None:
         out.write(f"report failed: {exc}\n")
         return
     out.write(f"report written to {path} ({len(state.entries)} entries)\n")
+
+
+def _term_to_lean(t) -> str:
+    """Render a Term as a Lean 4 expression over `*` (`HMul.hMul`).
+
+    Matches the magma pretty-printer's grouping: left children stay bare,
+    right children get parens when they are themselves operators.
+    """
+    from .term import Op, Var
+    if isinstance(t, Var):
+        return t.name
+    left = _term_to_lean(t.left)
+    right = _term_to_lean(t.right)
+    if isinstance(t.right, Op):
+        right = f"({right})"
+    return f"{left} * {right}"
+
+
+def _collect_vars(t) -> set[str]:
+    from .term import Op, Var
+    if isinstance(t, Var):
+        return {t.name}
+    return _collect_vars(t.left) | _collect_vars(t.right)
+
+
+def _lean_forall(eq: Equation) -> str:
+    """Render a universally quantified Lean equation:
+
+        ∀ x y : G, x * y = y * (x * x)
+
+    Variables are sorted to give a deterministic, readable signature.
+    """
+    vars_set = _collect_vars(eq.lhs) | _collect_vars(eq.rhs)
+    if vars_set:
+        vars_str = " ".join(sorted(vars_set))
+        return f"∀ {vars_str} : G, {_term_to_lean(eq.lhs)} = {_term_to_lean(eq.rhs)}"
+    return f"{_term_to_lean(eq.lhs)} = {_term_to_lean(eq.rhs)}"
+
+
+_LEAN_PREAMBLE = """-- magmaexplorer export: {name}
+-- {count} {entries_word}
+--
+-- Each `axiom` is an input equation (no derivation in the REPL).
+-- Each `theorem` carries a `sorry` placeholder; the comment block above it
+-- records the DSL primitives the magmaexplorer REPL used to derive it.
+-- Fill in the `by ...` blocks to produce a complete Lean proof script for
+-- submission (e.g. to the equational-theories distillation challenge).
+
+variable {{G : Type*}} [Mul G]
+"""
+
+
+def _do_lean(arg: str, state: State, out: TextIO) -> None:
+    name = arg.strip()
+    if not name:
+        out.write("usage: /lean <filename>\n")
+        return
+
+    path = name if name.endswith(".lean") else f"{name}.lean"
+
+    count = len(state.entries)
+    lines: list[str] = []
+    lines.append(_LEAN_PREAMBLE.format(
+        name=name,
+        count=count,
+        entries_word="entry" if count == 1 else "entries",
+    ))
+
+    for i, e in enumerate(state.entries):
+        lines.append("")
+        if isinstance(e.content, Definition):
+            lines.append(f"-- [{i}] definition: {pretty_entry(e.content)}")
+            lines.append(f"--     (syntactic abbreviation; inline `{e.content.name}` as `{_term_to_lean(e.content.body)}` where needed)")
+            continue
+
+        statement = _lean_forall(e.content)
+        if not e.sources and not e.steps:
+            lines.append(f"-- [{i}] axiom: {pretty_entry(e.content)}")
+            lines.append(f"axiom eq_{i} : {statement}")
+        else:
+            srcs = ", ".join(f"[{s}]" for s in e.sources) if e.sources else "(none)"
+            lines.append(f"-- [{i}] derived from {srcs}")
+            for k, step in enumerate(e.steps, 1):
+                lines.append(f"--     {k}. {step}")
+            lines.append(f"theorem eq_{i} : {statement} := by")
+            lines.append("  sorry")
+
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        out.write(f"lean export failed: {exc}\n")
+        return
+    out.write(f"lean script written to {path} ({count} entries)\n")
 
 
 def _do_verify(arg: str, state: State, critic: CriticCallable, out: TextIO) -> None:
@@ -410,6 +562,9 @@ _HELP_TEXT = """commands:
                     structured YAML file <name>.deduction
   /report <name>    export the full list as a markdown file <name>.md with a
                     table and a mermaid graph of the deduction relations
+  /lean <name>      export the full list as a Lean 4 script <name>.lean
+                    (axioms for inputs, theorem-with-sorry for derived entries,
+                    DSL steps preserved as comments)
   /clear            empty the entire list (asks for confirmation)
   /clear <i>        delete entry i and every entry derived from it (cascading)
   /save <path>      write list to a JSON file
@@ -543,6 +698,8 @@ def _handle_slash(
         _do_deduction(arg, state, out)
     elif cmd == "/report":
         _do_report(arg, state, out)
+    elif cmd == "/lean":
+        _do_lean(arg, state, out)
     elif cmd == "/clear":
         _do_clear(arg, state, out, read_input)
     elif cmd == "/save":

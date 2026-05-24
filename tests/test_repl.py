@@ -711,7 +711,8 @@ def test_report_includes_mermaid_block(tmp_path, monkeypatch):
     # n0 represents [0], n1 represents [1]; [1] derives from [0]
     assert "n0" in text
     assert "n1" in text
-    assert "n0 --> n1" in text
+    # Edge is now labeled with the DSL primitive (`sym`) that derived it.
+    assert "n0 -->|sym| n1" in text
 
 
 def test_report_definition_uses_different_node_shape(tmp_path, monkeypatch):
@@ -1016,3 +1017,216 @@ def test_unverified_appears_when_no_steps_returned():
 
     output = _run(["x*y = y*x", "go", "/quit"], llm=fake_llm)
     assert "[unverified]" in output
+
+
+# ---------------------------------------------------------------------------
+# /report — edges carry the DSL primitive name as a mermaid edge label
+# ---------------------------------------------------------------------------
+
+def test_report_edge_labeled_with_primitive_sym(tmp_path, monkeypatch):
+    """A `/sym 0` step produces edge `n0 -->|sym| n1` in the mermaid block."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*x",
+        "/sym 0",
+        "/report g",
+        "/quit",
+    ])
+    mermaid = (tmp_path / "g.md").read_text().split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "n0 -->|sym| n1" in mermaid
+
+
+def test_report_edge_labeled_with_primitive_inst(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "x*y = y*(x*x)",
+        "/inst 0 x:=a, y:=b",
+        "/report g",
+        "/quit",
+    ])
+    mermaid = (tmp_path / "g.md").read_text().split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "n0 -->|inst| n1" in mermaid
+
+
+def test_report_trans_labels_both_edges(tmp_path, monkeypatch):
+    """A `/trans 0 1` step labels BOTH incoming edges with `trans`."""
+    monkeypatch.chdir(tmp_path)
+    _run([
+        "a = b",
+        "b = c",
+        "/trans 0 1",
+        "/report g",
+        "/quit",
+    ])
+    mermaid = (tmp_path / "g.md").read_text().split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "n0 -->|trans| n2" in mermaid
+    assert "n1 -->|trans| n2" in mermaid
+
+
+def test_report_unparseable_step_leaves_edge_unlabeled(tmp_path, monkeypatch):
+    """If the derivation comes from the LLM and isn't valid DSL, the edge
+    has no label — graceful degradation, not a crash."""
+    def fake_llm(eqs, cmd):
+        # Plain-English step; not DSL parseable.
+        return LLMResult(equation="y*x = x*y", sources=[0], steps=["just swap the sides"])
+
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "swap it", "/report g", "/quit"], llm=fake_llm)
+    mermaid = (tmp_path / "g.md").read_text().split("```mermaid", 1)[1].split("```", 1)[0]
+    # The edge exists but has no `|label|`.
+    assert "n0 --> n1" in mermaid
+    assert "|" not in mermaid  # no edge label anywhere
+
+
+def test_report_multiple_steps_same_source_combines_labels(tmp_path, monkeypatch):
+    """If an entry has multiple DSL steps that both reference the same source,
+    the edge label lists each primitive once, comma-separated."""
+    def fake_llm(eqs, cmd):
+        # Two steps both citing [0]: sym then inst.
+        return LLMResult(
+            equation="y*y = x*y",
+            sources=[0],
+            steps=["sym [0]", "inst [0] x:=y"],
+        )
+
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "do it", "/report g", "/quit"], llm=fake_llm)
+    mermaid = (tmp_path / "g.md").read_text().split("```mermaid", 1)[1].split("```", 1)[0]
+    # Both primitives appear in the same label.
+    assert "n0 -->|" in mermaid
+    line = next(ln for ln in mermaid.splitlines() if "n0 -->|" in ln and "n1" in ln)
+    assert "sym" in line and "inst" in line
+
+
+# ---------------------------------------------------------------------------
+# /lean <filename> — export the command history as a Lean 4 script
+# ---------------------------------------------------------------------------
+
+def test_lean_no_arg_prints_usage():
+    output = _run(["/lean", "/quit"])
+    assert "usage: /lean" in output
+
+
+def test_lean_help_includes_command():
+    output = _run(["/help", "/quit"])
+    assert "/lean" in output
+
+
+def test_lean_writes_file_with_lean_extension(tmp_path, monkeypatch):
+    """/lean foo writes foo.lean."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/lean foo", "/quit"])
+    assert (tmp_path / "foo.lean").exists()
+
+
+def test_lean_existing_extension_kept(tmp_path, monkeypatch):
+    """/lean foo.lean writes foo.lean (not foo.lean.lean)."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/lean foo.lean", "/quit"])
+    assert (tmp_path / "foo.lean").exists()
+    assert not (tmp_path / "foo.lean.lean").exists()
+
+
+def test_lean_has_magma_preamble(tmp_path, monkeypatch):
+    """The file declares a magma type variable G with a Mul instance."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "variable" in text and "G" in text and "Mul G" in text
+
+
+def test_lean_axiom_for_no_source_entry(tmp_path, monkeypatch):
+    """Entries with no sources become `axiom` declarations (no proof needed)."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*(x*x)", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # Axiom with universal quantifier over the free variables.
+    assert "axiom eq_0" in text
+    assert "∀" in text
+    assert "x * y = y * (x * x)" in text
+
+
+def test_lean_theorem_with_sorry_for_derived(tmp_path, monkeypatch):
+    """Derived entries become `theorem eq_i : ... := by sorry`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "theorem eq_1" in text
+    assert "sorry" in text
+    assert "y * x = x * y" in text
+
+
+def test_lean_definition_becomes_comment(tmp_path, monkeypatch):
+    """A magmaexplorer definition has no direct Lean translation — it appears
+    as a comment in the script."""
+    monkeypatch.chdir(tmp_path)
+    _run(["p := x*x", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # No theorem/axiom for the definition entry, just a comment.
+    assert "axiom eq_0" not in text
+    assert "theorem eq_0" not in text
+    # The comment records the definition body.
+    assert "p := x*x" in text
+
+
+def test_lean_records_dsl_steps_as_comments(tmp_path, monkeypatch):
+    """The derivation chain (sources + DSL steps) appears as a comment
+    above each `theorem`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x*y = y*x", "/sym 0", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    # The DSL step `sym [0]` should appear in a comment line.
+    lines = text.splitlines()
+    sym_comment_lines = [ln for ln in lines if ln.lstrip().startswith("--") and "sym [0]" in ln]
+    assert sym_comment_lines, "expected a comment line mentioning the DSL step `sym [0]`"
+
+
+def test_lean_universal_quantifier_lists_all_free_vars_sorted(tmp_path, monkeypatch):
+    """For an equation with vars {a, c, b}, the theorem reads `∀ a b c : G, ...`."""
+    monkeypatch.chdir(tmp_path)
+    _run(["c*a = b*a", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "∀ a b c : G" in text
+
+
+def test_lean_empty_list(tmp_path, monkeypatch):
+    """/lean on an empty list still writes the preamble — never crashes."""
+    monkeypatch.chdir(tmp_path)
+    _run(["/lean empty", "/quit"])
+    text = (tmp_path / "empty.lean").read_text()
+    assert "variable" in text  # preamble present
+    # No axiom/theorem declarations should be emitted; the preamble comment
+    # mentions the words `axiom` and `theorem` so we look for the actual
+    # Lean keyword pattern at the start of a non-comment line.
+    code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("--")]
+    assert not any(ln.startswith("axiom ") for ln in code_lines)
+    assert not any(ln.startswith("theorem ") for ln in code_lines)
+
+
+def test_lean_writes_confirmation_message(tmp_path, monkeypatch):
+    """The REPL prints a `wrote to <path>` confirmation after /lean."""
+    monkeypatch.chdir(tmp_path)
+    output = _run(["x*y = y*x", "/lean foo", "/quit"])
+    assert "foo.lean" in output
+
+
+def test_lean_parens_for_right_associative(tmp_path, monkeypatch):
+    """The Lean output respects right-grouping parens, matching the pretty-printer."""
+    monkeypatch.chdir(tmp_path)
+    _run(["x = y*(z*w)", "/lean foo", "/quit"])
+    text = (tmp_path / "foo.lean").read_text()
+    assert "x = y * (z * w)" in text
+
+
+def test_lean_name_clash_for_index_uses_numeric(tmp_path, monkeypatch):
+    """Sanity: entry index 10 produces `eq_10`, not a renamed identifier."""
+    monkeypatch.chdir(tmp_path)
+    # Make 11 entries: one axiom + 10 sym applications.
+    inputs = ["x*y = y*x"]
+    for _ in range(10):
+        # Always sym the latest entry.
+        inputs.append(f"/sym {len(inputs) - 1}")
+    inputs += ["/lean foo", "/quit"]
+    _run(inputs)
+    text = (tmp_path / "foo.lean").read_text()
+    assert "eq_10" in text
