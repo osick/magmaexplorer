@@ -336,17 +336,17 @@ def _do_report(arg: str, state: State, out: TextIO) -> None:
 
         lines.append("## Deduction graph")
         lines.append("")
-        lines.append("Each node is labelled with its entry index — cross-reference the table above for the statement.")
-        lines.append("An arrow `na --> nb` means entry `b` cites entry `a` as a source.")
+        lines.append("Each node shows the entry's magma statement. An arrow `na --> nb` means entry `b` cites entry `a` as a source.")
         lines.append("Definitions are drawn as stadiums; equations as rectangles.")
         lines.append("")
         lines.append("```mermaid")
         lines.append("graph TD")
         for i, e in enumerate(state.entries):
+            label = pretty_entry(e.content)
             if isinstance(e.content, Definition):
-                lines.append(f"    n{i}([{i}])")
+                lines.append(f'    n{i}(["{label}"])')
             else:
-                lines.append(f"    n{i}[{i}]")
+                lines.append(f'    n{i}["{label}"]')
         for i, e in enumerate(state.entries):
             for s in e.sources:
                 if 0 <= s < len(state.entries):

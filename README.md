@@ -416,9 +416,7 @@ Notes:
 Writes `<name>.md`, a self-contained markdown file with **two parts**:
 
 1. A markdown **table** listing every entry — `#`, `Kind`, `Statement`, `Sources`, `Steps` (multi-line cells use `<br>`).
-2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node labelled with just its **bare index** (`0`, `1`, `2`, …); cross-reference the table for the actual statement. An arrow `na --> nb` means entry `b` cites entry `a` as a source. Equations are rectangles (`n0[0]`); definitions are stadiums (`n1([1])`). Standalone axioms appear as isolated nodes with no incoming edges.
-
-The label is intentionally just the integer index — embedding the equation text in the label produced rendering issues across viewers (strict mermaid parsers either rejected raw parens/brackets entirely, leaving the canvas empty, or displayed HTML-escaped entities literally). Plain integer labels render reliably in every mermaid viewer.
+2. A **mermaid `graph TD` block** drawing the deduction DAG. Each entry is a node whose label is the magma equation (or definition) itself, wrapped in mermaid's quoted-string label syntax (`n0["x*y = y*(x*x)"]`). An arrow `na --> nb` means entry `b` cites entry `a` as a source. Equations are rectangles; definitions are stadiums (`n1(["p := x*x"])`). Standalone axioms appear as isolated nodes with no incoming edges.
 
 Open the resulting `.md` in any mermaid-aware viewer: GitHub or GitLab (renders inline), VS Code with the *Markdown Preview Mermaid Support* extension, Obsidian, or `mmdc` / `mermaid-cli` to render to SVG/PNG.
 
@@ -442,10 +440,10 @@ _4 entries_
 
 ```mermaid
 graph TD
-    n0[0]
-    n1([1])
-    n2[2]
-    n3[3]
+    n0["x*y = y*(x*x)"]
+    n1(["p := x*x"])
+    n2["y*(x*x) = x*y"]
+    n3["x*p = p*(x*x)"]
     n0 --> n2
     n0 --> n3
 ```

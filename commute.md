@@ -1,4 +1,4 @@
-# magmaexplorer report: commute.md
+# magmaexplorer report: commute
 
 _11 entries_
 
@@ -13,29 +13,29 @@ _11 entries_
 | [4] | equation | `x*x = x*x*(x*x)` | 2 | 1. inst [2] y:=x |
 | [5] | equation | `y*(x*x) = y*y*(x*x)` | 3, 4 | 1. rewrite [3] using [4] backwards |
 | [6] | equation | `y*y*(x*x) = x*y` | 5, 0 | 1. trans [5] [0] |
-| [7] | equation | `x*x*(y*y) = y*x` | 6 | 1. inst [6] x:=y, y:=x |
+| [7] | equation | `y*y*(x*x) = x*y` | 5, 0 | 1. trans [5] [0] |
 | [8] | equation | `x*x*(y*y) = y*x` | 6 | 1. inst [6] x:=y, y:=x |
-| [9] | equation | `y*x = x*x*(y*y)` | 7 | 1. sym [7] |
+| [9] | equation | `x*y = y*y*(x*x)` | 7 | 1. sym [7] |
 | [10] | equation | `y*x = x*y` | 8, 2 | 1. trans [8] [2] |
 
 ## Deduction graph
 
-Each node is one entry. An arrow `[a] --> [b]` means `[b]` cites `[a]` as a source.
-Definitions are drawn with rounded corners; equations with rectangles.
+Each node shows the entry's magma statement. An arrow `na --> nb` means entry `b` cites entry `a` as a source.
+Definitions are drawn as stadiums; equations as rectangles.
 
 ```mermaid
 graph TD
     n0["x*y = y*(x*x)"]
-    n1["&#91;1&#93; y*&#40;x*x&#41; = x*x*&#40;y*y&#41;"]
-    n2["&#91;2&#93; x*y = x*x*&#40;y*y&#41;"]
-    n3["&#91;3&#93; y*&#40;x*x&#41; = y*y*&#40;x*x*&#40;x*x&#41;&#41;"]
-    n4["&#91;4&#93; x*x = x*x*&#40;x*x&#41;"]
-    n5["&#91;5&#93; y*&#40;x*x&#41; = y*y*&#40;x*x&#41;"]
-    n6["&#91;6&#93; y*y*&#40;x*x&#41; = x*y"]
-    n7["&#91;7&#93; x*x*&#40;y*y&#41; = y*x"]
-    n8["&#91;8&#93; x*x*&#40;y*y&#41; = y*x"]
-    n9["&#91;9&#93; y*x = x*x*&#40;y*y&#41;"]
-    n10["&#91;10&#93; y*x = x*y"]
+    n1["y*(x*x) = x*x*(y*y)"]
+    n2["x*y = x*x*(y*y)"]
+    n3["y*(x*x) = y*y*(x*x*(x*x))"]
+    n4["x*x = x*x*(x*x)"]
+    n5["y*(x*x) = y*y*(x*x)"]
+    n6["y*y*(x*x) = x*y"]
+    n7["y*y*(x*x) = x*y"]
+    n8["x*x*(y*y) = y*x"]
+    n9["x*y = y*y*(x*x)"]
+    n10["y*x = x*y"]
     n0 --> n1
     n1 --> n2
     n0 --> n2
@@ -45,7 +45,8 @@ graph TD
     n4 --> n5
     n5 --> n6
     n0 --> n6
-    n6 --> n7
+    n5 --> n7
+    n0 --> n7
     n6 --> n8
     n7 --> n9
     n8 --> n10
