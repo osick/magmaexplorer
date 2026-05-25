@@ -1254,9 +1254,10 @@ def test_lean_trans_uses_symm_when_a_lhs_matches_b_lhs(tmp_path, monkeypatch):
     assert "sorry" not in eq2_block
 
 
-def test_lean_multi_step_falls_back_to_sorry(tmp_path, monkeypatch):
-    """Multi-step entries (with intermediate s<k> references or several
-    DSL primitives in sequence) currently still emit `sorry`."""
+def test_lean_multi_step_emits_have_blocks_no_sorry(tmp_path, monkeypatch):
+    """Multi-step entries (with `s<k>` step references) are auto-translated
+    into `have h_s<k> := by …` blocks per intermediate, with the final step
+    discharging the outer goal — no `sorry`."""
     def fake_llm(eqs, cmd):
         return LLMResult(
             equation="y*(x*x) = x*y",
@@ -1267,9 +1268,9 @@ def test_lean_multi_step_falls_back_to_sorry(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _run(["x*y = y*(x*x)", "go", "/lean foo", "/quit"], llm=fake_llm)
     text = (tmp_path / "foo.lean").read_text()
-    # The derived theorem still has sorry, but the comment block lists both steps.
     eq1_block = text.split("theorem eq_1")[1].split("\n\n", 1)[0]
-    assert "sorry" in eq1_block
+    assert "sorry" not in eq1_block
+    assert "have h_s1" in eq1_block
 
 
 def test_lean_rewrite_forward_emits_rw_at_hypothesis(tmp_path, monkeypatch):

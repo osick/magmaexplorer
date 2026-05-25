@@ -233,10 +233,109 @@ def test_proof_body_rewrite_uses_rw_tactic():
     assert "exact" in text
 
 
-def test_proof_body_multi_step_falls_back_to_sorry():
-    e = Entry(content=_eq("x = x"), sources=[0], steps=["sym [0]", "sym s1"])
-    entries = [_axiom("x = x"), e]
-    body = proof_body(e, entries, goal_vars=["x"])
+# ---------------------------------------------------------------------------
+# proof_body — multi-step chains (Layer 2)
+# ---------------------------------------------------------------------------
+
+
+def test_proof_body_two_step_inst_then_sym_no_sorry():
+    # Derivation: inst [0] x:=a, y:=b   => a*b = b*a
+    #             sym s1                 => b*a = a*b
+    axiom = _axiom("x*y = y*x")
+    e = Entry(
+        content=_eq("b*a = a*b"),
+        sources=[0],
+        steps=["inst [0] x:=a, y:=b", "sym s1"],
+    )
+    entries = [axiom, e]
+    body = proof_body(e, entries, goal_vars=["a", "b"])
+    text = "\n".join(body)
+    assert "sorry" not in text
+    # Intermediate result is named h_s1 ...
+    assert "have h_s1" in text
+    # ... and the final step references it via `.symm`-style application.
+    assert "h_s1" in text.split("have h_s1", 1)[1]
+
+
+def test_proof_body_three_step_chain_no_sorry():
+    # eq0: x*y = y*x
+    # eq1: a = b
+    # inst [0] x:=a, y:=a   => a*a = a*a
+    # inst [0] x:=a, y:=b   => a*b = b*a
+    # sym s2                => b*a = a*b
+    axiom = _axiom("x*y = y*x")
+    other = _axiom("a = b")
+    e = Entry(
+        content=_eq("b*a = a*b"),
+        sources=[0],
+        steps=[
+            "inst [0] x:=a, y:=a",
+            "inst [0] x:=a, y:=b",
+            "sym s2",
+        ],
+    )
+    entries = [axiom, other, e]
+    body = proof_body(e, entries, goal_vars=["a", "b"])
+    text = "\n".join(body)
+    assert "sorry" not in text
+    # Each non-final intermediate gets its own `have`.
+    assert "have h_s1" in text
+    assert "have h_s2" in text
+    # The last step does NOT get a `have h_s3`; it discharges the outer goal.
+    assert "have h_s3" not in text
+
+
+def test_proof_body_trans_using_step_refs_no_sorry():
+    # axiom 0: a = b
+    # axiom 1: b = c
+    # sym [0]      => b = a   (s1)
+    # trans s1 [1] -- intermediate b=a + b=c via shared b -> a = c
+    e = Entry(
+        content=_eq("a = c"),
+        sources=[0, 1],
+        steps=["sym [0]", "trans s1 [1]"],
+    )
+    entries = [_axiom("a = b"), _axiom("b = c"), e]
+    body = proof_body(e, entries, goal_vars=["a", "c"])
+    text = "\n".join(body)
+    assert "sorry" not in text
+    assert "have h_s1" in text
+
+
+def test_proof_body_unparseable_step_in_chain_still_sorrys():
+    # If one step of a chain is not parseable, the whole chain can't be
+    # replayed deterministically — fall back to sorry rather than emit a
+    # half-working block that would type-check by accident.
+    e = Entry(
+        content=_eq("a = b"),
+        sources=[0],
+        steps=["sym [0]", "garbage nonsense", "sym s2"],
+    )
+    entries = [_axiom("a = b"), e]
+    body = proof_body(e, entries, goal_vars=["a", "b"])
+    assert any("sorry" in ln for ln in body)
+
+
+def test_proof_body_step_with_runtime_failure_in_chain_still_sorrys():
+    # `trans [0] [0]` here will succeed (a == a), but `rewrite [0] using [0]`
+    # where the pattern isn't found surfaces a runtime DSLError; the multi-
+    # step replay must abort with sorry, not emit garbage.
+    e = Entry(
+        content=_eq("a = b"),
+        sources=[0],
+        steps=["sym [0]", "rewrite s1 using [0] backwards"],
+    )
+    # `rewrite s1 using [0] backwards`: pattern = rhs of [0] = b.
+    # s1 = b = a; pattern b appears in s1 (LHS). Actually this would succeed
+    # too. Use a definitively-failing case:
+    e2 = Entry(
+        content=_eq("a = b"),
+        sources=[0, 1],
+        steps=["sym [0]", "trans s1 [1]"],
+    )
+    # entries[1] = c = d (disjoint), trans s1=(b=a) with c=d shares nothing.
+    entries = [_axiom("a = b"), _axiom("c = d"), e2]
+    body = proof_body(e2, entries, goal_vars=["a", "b"])
     assert any("sorry" in ln for ln in body)
 
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Callable
 
 from . import dsl as _dsl
-from .dsl import DSLError, EntryRef
+from .dsl import DSLError, EntryRef, Ref, StepRef
 from .entries import Entry, Item, compute_ancestors
 from .term import (
     Definition,
@@ -67,7 +67,7 @@ LEAN_STANDALONE_PREAMBLE = """-- magmaexplorer export: {name}
 """
 
 
-LEAN_IMPLICATION_PREAMBLE = """-- magmaexplorer implication: [{from_idx}] => [{to_idx}]
+LEAN_IMPLICATION_PREAMBLE = """-- magmaexplorer implication: [{from_idx}] => [{to_idx}]  ({name})
 -- Chain length: {n} entries.
 -- Hypothesis (h): {from_stmt}
 -- Goal:           {to_stmt}
@@ -234,28 +234,151 @@ def proof_body(
     whether to write the block verbatim (top-level theorem) or re-indent it
     by adding another 2 spaces (nested `have ... := by ...`).
 
-    Returns `["  sorry  -- <reason>"]` for everything that can't yet be
-    auto-translated: multi-step entries, steps using `s<k>` step references,
-    `expand` / `fold` (definitions have no direct Lean counterpart), or steps
-    that fail to parse as DSL.
+    For a single-step entry: translates the one DSL primitive directly into a
+    `intro / exact`-style tactic block.
+
+    For a multi-step entry: replays the chain via `dsl.execute_step` to
+    compute every intermediate equation, then emits one
+    `have h_s<k> : ∀ vars : G, <eq_k> := by ...` block per non-final step,
+    and finally the discharge for the outer goal. Each per-step proof uses
+    the *same* single-step translator, but with `StepRef` references now
+    resolving to the local `h_s<k>` identifiers.
+
+    Falls back to `["  sorry  -- <reason>"]` only when the chain cannot be
+    deterministically replayed (parse error, runtime DSLError) or a primitive
+    has no direct Lean counterpart (`expand` / `fold`).
 
     The `name` resolver maps an entry index to the Lean identifier the proof
     should use for that entry's universally-quantified equation. The default
     (`eq_<i>`) is right for standalone files; implication mode passes a
     resolver returning `h` for the hypothesis index and `h_<i>` for inlined
     intermediates."""
-    # Multi-step is out of scope for the MVP — fall back.
-    if len(entry.steps) != 1:
-        return ["  sorry  -- multi-step derivation; translate the chain manually"]
+    if len(entry.steps) == 0:
+        return ["  sorry  -- no steps to translate"]
 
-    raw = entry.steps[0]
-    clean = strip_verify_prefix(raw)
+    # Parse every step up front; bail on the first parse failure.
+    parsed: list[_dsl.Step] = []
+    for raw in entry.steps:
+        clean = strip_verify_prefix(raw)
+        try:
+            parsed.append(_dsl.parse_step(clean))
+        except DSLError:
+            return [f"  sorry  -- step did not parse as DSL: {raw}"]
 
-    try:
-        step = _dsl.parse_step(clean)
-    except DSLError:
-        return [f"  sorry  -- step did not parse as DSL: {raw}"]
+    # Items view for the executor: it only needs the bare equations/definitions.
+    items: list[Item] = [e.content for e in entries]
 
+    # Replay the chain, accumulating prior_results. Abort on first runtime
+    # failure — the resulting Lean would otherwise be silently wrong.
+    prior_results = []
+    for raw, step in zip(entry.steps, parsed):
+        try:
+            prior_results.append(_dsl.execute_step(step, items, prior_results))
+        except DSLError as exc:
+            return [f"  sorry  -- step failed at runtime: {raw} [{exc}]"]
+
+    # Single-step path: the original direct translation, now via the shared
+    # primitive translator with empty step context.
+    if len(parsed) == 1:
+        return _translate_step(
+            parsed[0],
+            entry.steps[0],
+            entries,
+            prior_results=[],
+            goal_vars=goal_vars,
+            name=name,
+        )
+
+    # Multi-step path: emit `have h_s<k>` blocks for each intermediate, then
+    # discharge the outer goal using the final step.
+    lines: list[str] = []
+    for k in range(len(parsed) - 1):
+        step_eq = prior_results[k]
+        if not isinstance(step_eq, Equation):
+            return [f"  sorry  -- step result is not an equation: {entry.steps[k]}"]
+        step_vars = sorted(collect_vars(step_eq.lhs) | collect_vars(step_eq.rhs))
+        lines.append(f"  have h_s{k + 1} : {render_forall(step_eq)} := by")
+        sub = _translate_step(
+            parsed[k],
+            entry.steps[k],
+            entries,
+            prior_results=prior_results[:k],
+            goal_vars=step_vars,
+            name=name,
+        )
+        # `sub` already has 2-space indentation for "top-level"; nest by 2 more.
+        for ln in sub:
+            lines.append("  " + ln)
+
+    # Discharge the outer goal with the last step. It sees ALL prior_results
+    # (so its StepRefs resolve), and uses the entry's goal_vars for `intro`.
+    final = _translate_step(
+        parsed[-1],
+        entry.steps[-1],
+        entries,
+        prior_results=prior_results[: len(parsed) - 1],
+        goal_vars=goal_vars,
+        name=name,
+    )
+    lines.extend(final)
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Single-step → Lean (the part the multi-step driver reuses per step)
+# ---------------------------------------------------------------------------
+
+
+def _step_ref_id(idx: int) -> str:
+    """Lean identifier for the result of step `idx` (1-based) in a multi-step
+    chain. Mirrors the DSL's `s<k>` convention."""
+    return f"h_s{idx}"
+
+
+def _resolve_ref(
+    ref: Ref,
+    entries: list[Entry],
+    prior_results: list[Equation],
+    name: NameResolver,
+) -> tuple[Equation, str, list[str]] | None:
+    """Resolve a DSL `Ref` to (equation, Lean identifier, sorted vars).
+
+    EntryRef → `entries[i].content` + `name(i)` + bound vars of that equation.
+    StepRef  → `prior_results[i-1]` + `h_s<i>` + bound vars of that result.
+
+    Returns `None` if the ref points at a non-equation, an out-of-range
+    entry, or a step result that isn't available yet."""
+    if isinstance(ref, EntryRef):
+        if not (0 <= ref.index < len(entries)):
+            return None
+        eq = entries[ref.index].content
+        if not isinstance(eq, Equation):
+            return None
+        vars_ = sorted(collect_vars(eq.lhs) | collect_vars(eq.rhs))
+        return eq, name(ref.index), vars_
+    # StepRef — 1-based.
+    idx0 = ref.index - 1
+    if not (0 <= idx0 < len(prior_results)):
+        return None
+    eq = prior_results[idx0]
+    vars_ = sorted(collect_vars(eq.lhs) | collect_vars(eq.rhs))
+    return eq, _step_ref_id(ref.index), vars_
+
+
+def _translate_step(
+    step: _dsl.Step,
+    raw: str,
+    entries: list[Entry],
+    prior_results: list[Equation],
+    goal_vars: list[str],
+    name: NameResolver,
+) -> list[str]:
+    """Translate ONE DSL primitive into a 2-space-indented Lean tactic block.
+
+    `prior_results` is the list of intermediate equation values from earlier
+    steps in the same multi-step chain; it is `[]` for single-step entries.
+    All references resolve through `_resolve_ref`, so both `[i]` (EntryRef)
+    and `s<k>` (StepRef) work uniformly."""
     intro_line = f"  intro {' '.join(goal_vars)}" if goal_vars else None
 
     def _emit(exact_term: str) -> list[str]:
@@ -266,37 +389,30 @@ def proof_body(
         return body
 
     if isinstance(step, _dsl.Sym):
-        if not isinstance(step.target, EntryRef):
-            return [f"  sorry  -- sym on step-ref not auto-translated: {raw}"]
-        src_vars = entry_sorted_vars(entries, step.target.index)
-        if src_vars is None:
-            return [f"  sorry  -- sym target is not an equation: {raw}"]
-        tgt_name = name(step.target.index)
+        resolved = _resolve_ref(step.target, entries, prior_results, name)
+        if resolved is None:
+            return [f"  sorry  -- sym target not resolvable: {raw}"]
+        _, tgt_name, src_vars = resolved
         applied = f"{tgt_name} {' '.join(src_vars)}".strip() if src_vars else tgt_name
         return _emit(f"({applied}).symm")
 
     if isinstance(step, _dsl.Inst):
-        if not isinstance(step.target, EntryRef):
-            return [f"  sorry  -- inst on step-ref not auto-translated: {raw}"]
-        src_vars = entry_sorted_vars(entries, step.target.index)
-        if src_vars is None:
-            return [f"  sorry  -- inst target is not an equation: {raw}"]
+        resolved = _resolve_ref(step.target, entries, prior_results, name)
+        if resolved is None:
+            return [f"  sorry  -- inst target not resolvable: {raw}"]
+        _, tgt_name, src_vars = resolved
         subst = {v: t for v, t in step.substitutions}
-        return _emit(apply_eq_with_subst(name(step.target.index), src_vars, subst))
+        return _emit(apply_eq_with_subst(tgt_name, src_vars, subst))
 
     if isinstance(step, _dsl.Trans):
-        if not (isinstance(step.left, EntryRef) and isinstance(step.right, EntryRef)):
-            return [f"  sorry  -- trans on step-ref not auto-translated: {raw}"]
-        a_idx = step.left.index
-        b_idx = step.right.index
-        a_vars = entry_sorted_vars(entries, a_idx)
-        b_vars = entry_sorted_vars(entries, b_idx)
-        if a_vars is None or b_vars is None:
-            return [f"  sorry  -- trans operand is not an equation: {raw}"]
-        a_eq = entries[a_idx].content
-        b_eq = entries[b_idx].content
-        a_apply = apply_eq_for_trans(name(a_idx), a_vars, goal_vars)
-        b_apply = apply_eq_for_trans(name(b_idx), b_vars, goal_vars)
+        a = _resolve_ref(step.left, entries, prior_results, name)
+        b = _resolve_ref(step.right, entries, prior_results, name)
+        if a is None or b is None:
+            return [f"  sorry  -- trans operand not resolvable: {raw}"]
+        a_eq, a_name, a_vars = a
+        b_eq, b_name, b_vars = b
+        a_apply = apply_eq_for_trans(a_name, a_vars, goal_vars)
+        b_apply = apply_eq_for_trans(b_name, b_vars, goal_vars)
         if a_eq.rhs == b_eq.lhs:
             return _emit(f"({a_apply}).trans ({b_apply})")
         if a_eq.lhs == b_eq.lhs:
@@ -308,14 +424,13 @@ def proof_body(
         return [f"  sorry  -- trans: no shared side detected (should not happen)"]
 
     if isinstance(step, _dsl.Rewrite):
-        if not (isinstance(step.target, EntryRef) and isinstance(step.rule, EntryRef)):
-            return [f"  sorry  -- rewrite on step-ref not auto-translated: {raw}"]
-        t_idx = step.target.index
-        r_idx = step.rule.index
-        t_vars = entry_sorted_vars(entries, t_idx)
-        if t_vars is None or entry_sorted_vars(entries, r_idx) is None:
-            return [f"  sorry  -- rewrite operand is not an equation: {raw}"]
-        t_apply = apply_eq_for_trans(name(t_idx), t_vars, goal_vars)
+        t = _resolve_ref(step.target, entries, prior_results, name)
+        r = _resolve_ref(step.rule, entries, prior_results, name)
+        if t is None or r is None:
+            return [f"  sorry  -- rewrite operand not resolvable: {raw}"]
+        _, t_name, t_vars = t
+        _, r_name, _ = r
+        t_apply = apply_eq_for_trans(t_name, t_vars, goal_vars)
         arrow = "← " if step.backwards else ""
         body: list[str] = []
         if intro_line is not None:
@@ -324,11 +439,10 @@ def proof_body(
         body.append(f"  -- leftmost-outermost one. If the goal disagrees, replace `rw` with")
         body.append(f"  -- `nth_rewrite 1` (from Mathlib) to target a single occurrence.")
         body.append(f"  have h_rw := {t_apply}")
-        body.append(f"  rw [{arrow}{name(r_idx)}] at h_rw")
+        body.append(f"  rw [{arrow}{r_name}] at h_rw")
         body.append("  exact h_rw")
         return body
 
-    # expand / fold — not yet auto-translated
     primitive = PRIMITIVE_NAME.get(type(step), "<unknown>")
     return [
         f"  sorry  -- {primitive} not yet auto-translated; magmaexplorer definitions have no direct Lean counterpart"
@@ -484,6 +598,7 @@ def render_implication_file(
         LEAN_IMPLICATION_PREAMBLE.format(
             from_idx=from_idx,
             to_idx=to_idx,
+            name=name,
             n=len(chain),
             from_stmt=pretty_entry(from_entry.content),
             to_stmt=pretty_entry(to_entry.content),
