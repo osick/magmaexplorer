@@ -561,6 +561,59 @@ def render_standalone_file(entries: list[Entry], name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_sair_submission(
+    entries: list[Entry], from_idx: int, to_idx: int
+) -> str:
+    """Render a Lean certificate in the SAIR Stage 2 Solo `submission` shape.
+
+    Output: `import JudgeProblem` + `def submission : Goal := by intro G _ h ...`,
+    with the magma operator rendered as `◇` (the judge's convention).
+    Reuses :func:`compute_implication_chain` and :func:`proof_body` — only the
+    outer wrapper and the `*` → `◇` swap are SAIR-specific.
+
+    Raises :class:`ImplicationChainError` on the same conditions as
+    :func:`render_implication_file`."""
+    chain = compute_implication_chain(entries, from_idx, to_idx)
+
+    from_entry = entries[from_idx]
+    to_entry = entries[to_idx]
+    if not isinstance(from_entry.content, Equation):
+        raise ImplicationChainError(f"[{from_idx}] is not an equation")
+    if not isinstance(to_entry.content, Equation):
+        raise ImplicationChainError(f"[{to_idx}] is not an equation")
+
+    def resolve(idx: int) -> str:
+        return "h" if idx == from_idx else f"h_{idx}"
+
+    to_vars = sorted(collect_vars(to_entry.content.lhs) | collect_vars(to_entry.content.rhs))
+
+    body_lines: list[str] = []
+    if from_idx == to_idx:
+        body_lines.append("  exact h")
+    else:
+        for idx in chain:
+            if idx == from_idx or idx == to_idx:
+                continue
+            e = entries[idx]
+            assert isinstance(e.content, Equation)
+            stmt = render_forall(e.content)
+            i_vars = sorted(collect_vars(e.content.lhs) | collect_vars(e.content.rhs))
+            body_lines.append(f"  have h_{idx} : {stmt} := by")
+            for ln in proof_body(e, entries, i_vars, name=resolve):
+                body_lines.append("  " + ln)
+        for ln in proof_body(to_entry, entries, to_vars, name=resolve):
+            body_lines.append(ln)
+
+    # Body uses `*` everywhere; the SAIR judge expects `◇`.
+    body = "\n".join(body_lines).replace(" * ", " ◇ ")
+    return (
+        "import JudgeProblem\n\n"
+        "def submission : Goal := by\n"
+        "  intro G _ h\n"
+        f"{body}\n"
+    )
+
+
 def render_implication_file(
     entries: list[Entry], from_idx: int, to_idx: int, name: str
 ) -> str:

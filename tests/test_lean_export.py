@@ -22,6 +22,7 @@ from magmaexplorer.lean_export import (
     proof_body,
     render_forall,
     render_implication_file,
+    render_sair_submission,
     render_standalone_file,
     render_term,
     render_term_arg,
@@ -449,3 +450,69 @@ def test_compute_ancestors_includes_self_and_transitive_sources():
     assert compute_ancestors(entries, 2) == {0, 1, 2}
     assert compute_ancestors(entries, 1) == {0, 1}
     assert compute_ancestors(entries, 0) == {0}
+
+
+# ---------------------------------------------------------------------------
+# render_sair_submission — SAIR Stage 2 Solo certificate shape
+# ---------------------------------------------------------------------------
+
+
+def test_sair_submission_single_step_shape():
+    entries = [
+        _axiom("x*y = y*x"),
+        _derived("b*a = a*b", [0], "inst [0] x:=b, y:=a"),
+    ]
+    text = render_sair_submission(entries, 0, 1)
+    assert text.startswith("import JudgeProblem\n")
+    assert "def submission : Goal := by" in text
+    assert "intro G _ h" in text
+    # No sorry, no theorem header, no Mul-binders.
+    assert "sorry" not in text
+    assert "theorem" not in text
+    assert LEAN_BINDERS not in text
+
+
+def test_sair_submission_uses_diamond_operator():
+    # Multi-step picks up `have h_s1 : ∀ ... : G, ... = ... := by` whose
+    # statement contains operators that must come out as `◇`.
+    entries = [
+        _axiom("x*y = y*x"),
+        Entry(
+            content=_eq("b*a = a*b"),
+            sources=[0],
+            steps=["inst [0] x:=a, y:=b", "sym s1"],
+        ),
+    ]
+    text = render_sair_submission(entries, 0, 1)
+    code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("--")]
+    code = "\n".join(code_lines)
+    assert " * " not in code
+    assert "◇" in code
+
+
+def test_sair_submission_multi_step_keeps_have_blocks():
+    entries = [
+        _axiom("x*y = y*x"),
+        Entry(
+            content=_eq("b*a = a*b"),
+            sources=[0],
+            steps=["inst [0] x:=a, y:=b", "sym s1"],
+        ),
+    ]
+    text = render_sair_submission(entries, 0, 1)
+    assert "sorry" not in text
+    assert "have h_s1" in text
+
+
+def test_sair_submission_trivial_reflexive():
+    entries = [_axiom("x*y = y*x")]
+    text = render_sair_submission(entries, 0, 0)
+    assert "import JudgeProblem" in text
+    assert "intro G _ h" in text
+    assert "exact h" in text
+
+
+def test_sair_submission_raises_on_bad_chain():
+    entries = [_axiom("a = b"), _axiom("b = c"), _derived("a = c", [0, 1], "trans [0] [1]")]
+    with pytest.raises(ImplicationChainError):
+        render_sair_submission(entries, 0, 2)
