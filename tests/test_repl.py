@@ -1273,9 +1273,9 @@ def test_lean_multi_step_emits_have_blocks_no_sorry(tmp_path, monkeypatch):
     assert "have h_s1" in eq1_block
 
 
-def test_lean_rewrite_forward_emits_rw_at_hypothesis(tmp_path, monkeypatch):
-    """`rewrite [i] using [j]` becomes `rw [eq_j] at h` after pulling [i]
-    into a hypothesis via `have`."""
+def test_lean_rewrite_forward_emits_nth_rewrite_at_hypothesis(tmp_path, monkeypatch):
+    """`rewrite [i] using [j]` becomes `nth_rewrite 1 [eq_j] at h` (Step 5b:
+    DSL `rewrite` is leftmost-outermost, matching `nth_rewrite 1`)."""
     monkeypatch.chdir(tmp_path)
     _run([
         "a*x = x*a",        # [0]  target
@@ -1287,13 +1287,13 @@ def test_lean_rewrite_forward_emits_rw_at_hypothesis(tmp_path, monkeypatch):
     text = (tmp_path / "foo.lean").read_text()
     eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
     assert "have h" in eq2_block
-    assert "rw [eq_1] at h" in eq2_block
+    assert "nth_rewrite 1 [eq_1] at h" in eq2_block
     assert "exact h" in eq2_block
     assert "sorry" not in eq2_block
 
 
 def test_lean_rewrite_backwards_uses_arrow(tmp_path, monkeypatch):
-    """`rewrite [i] using [j] backwards` becomes `rw [← eq_j] at h`."""
+    """`rewrite [i] using [j] backwards` becomes `nth_rewrite 1 [← eq_j] at h`."""
     monkeypatch.chdir(tmp_path)
     _run([
         "a*a = b*a",         # [0]  target — RHS of rule (a*a) appears here
@@ -1304,7 +1304,7 @@ def test_lean_rewrite_backwards_uses_arrow(tmp_path, monkeypatch):
     ])
     text = (tmp_path / "foo.lean").read_text()
     eq2_block = text.split("theorem eq_2")[1].split("\n\n", 1)[0]
-    assert "rw [← eq_1] at h" in eq2_block
+    assert "nth_rewrite 1 [← eq_1] at h" in eq2_block
     assert "sorry" not in eq2_block
 
 

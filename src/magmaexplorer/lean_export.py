@@ -435,11 +435,10 @@ def _translate_step(
         body: list[str] = []
         if intro_line is not None:
             body.append(intro_line)
-        body.append(f"  -- NOTE: `rw` rewrites ALL occurrences; the DSL only rewrites the")
-        body.append(f"  -- leftmost-outermost one. If the goal disagrees, replace `rw` with")
-        body.append(f"  -- `nth_rewrite 1` (from Mathlib) to target a single occurrence.")
         body.append(f"  have h_rw := {t_apply}")
-        body.append(f"  rw [{arrow}{r_name}] at h_rw")
+        # DSL `rewrite` is leftmost-outermost (see term.rewrite_term);
+        # `nth_rewrite 1` from Mathlib targets exactly the first occurrence.
+        body.append(f"  nth_rewrite 1 [{arrow}{r_name}] at h_rw")
         body.append("  exact h_rw")
         return body
 
@@ -607,7 +606,8 @@ def render_sair_submission(
     # Body uses `*` everywhere; the SAIR judge expects `◇`.
     body = "\n".join(body_lines).replace(" * ", " ◇ ")
     return (
-        "import JudgeProblem\n\n"
+        "import JudgeProblem\n"
+        "import Mathlib.Tactic.NthRewrite\n\n"
         "def submission : Goal := by\n"
         "  intro G _ h\n"
         f"{body}\n"

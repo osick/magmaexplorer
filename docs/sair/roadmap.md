@@ -20,9 +20,15 @@ Specs referenced:
 | True-cert rendering with `inst`/`sym`/`trans`/`rewrite` | ✅ done |
 | `*` → `◇` operator swap at render time | ✅ done |
 | PROMPT constant (minimal placeholders) | ✅ done |
-| **Everything below** | ❌ not yet |
+| **Step 1 — Test dataset (ETP-sourced)** | ✅ done — 25 entries, 13 true / 12 false |
+| **Step 2 — Banned-token + code-size guards** | ✅ done — `_code_is_clean` in `sair_solo.py`, 11 tests |
+| **Step 3 — Brute-force false-cert search + render** | ✅ done — `false_cert.py`, 23 tests (12 dataset-driven) |
+| **Step 4 — Verdict-decision dispatch** | ✅ done — false-cert search runs before LLM loop, 4 dispatch tests |
+| **Step 5 — Lean translation gaps** | ✅ done — 5a already-implicit (DSL parser blocks `d_N` refs); 5b: `rw` → `nth_rewrite 1`, Mathlib import wired in |
+| **Step 6 — Wall-clock pacing** | ❌ not yet |
+| **Step 7 — Single-file solver.py packaging** | ❌ not yet |
 
-342 tests passing, 18 added in the last iteration.
+430 tests passing (+46 Step 1, +11 Step 2, +23 Step 3, +4 Step 4, +3 Step 5a regression + 1 Step 5b Mathlib-import).
 
 ---
 

@@ -1,0 +1,228 @@
+[
+  {
+    "id": "ETP_T_63_1692",
+    "equation1": "x = y*(x*(x*y))",
+    "equation2": "x = (y*x)*((y*x)*y)",
+    "verdict": "true",
+    "source": "Austin_implications.txt E63\u2192E1692"
+  },
+  {
+    "id": "ETP_T_65_359",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x*x = (x*x)*x",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E359"
+  },
+  {
+    "id": "ETP_T_65_614",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x = x*(x*((x*x)*x))",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E614"
+  },
+  {
+    "id": "ETP_T_65_817",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x = x*((x*x)*(x*x))",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E817"
+  },
+  {
+    "id": "ETP_T_65_1426",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x = (x*x)*(x*(x*x))",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E1426"
+  },
+  {
+    "id": "ETP_T_65_1491",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x = (y*x)*(y*(y*x))",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E1491"
+  },
+  {
+    "id": "ETP_T_65_3862",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x*x = (x*(x*x))*x",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E3862"
+  },
+  {
+    "id": "ETP_T_65_4065",
+    "equation1": "x = y*(x*(y*x))",
+    "equation2": "x*x = ((x*x)*x)*x",
+    "verdict": "true",
+    "source": "Austin_implications.txt E65\u2192E4065"
+  },
+  {
+    "id": "ETP_T_73_99",
+    "equation1": "x = y*(y*(x*y))",
+    "equation2": "x = x*((x*x)*x)",
+    "verdict": "true",
+    "source": "Austin_implications.txt E73\u2192E99"
+  },
+  {
+    "id": "ETP_T_73_125",
+    "equation1": "x = y*(y*(x*y))",
+    "equation2": "x = y*((y*x)*y)",
+    "verdict": "true",
+    "source": "Austin_implications.txt E73\u2192E125"
+  },
+  {
+    "id": "ETP_T_73_203",
+    "equation1": "x = y*(y*(x*y))",
+    "equation2": "x = (x*(x*x))*x",
+    "verdict": "true",
+    "source": "Austin_implications.txt E73\u2192E203"
+  },
+  {
+    "id": "ETP_T_73_229",
+    "equation1": "x = y*(y*(x*y))",
+    "equation2": "x = (y*(y*x))*y",
+    "verdict": "true",
+    "source": "Austin_implications.txt E73\u2192E229"
+  },
+  {
+    "id": "ETP_T_4_3",
+    "equation1": "x = x*y",
+    "equation2": "x = x*x",
+    "verdict": "true",
+    "source": "hand-curated (DSL-derivable)",
+    "tactic": [
+      "inst [0] y:=x"
+    ]
+  },
+  {
+    "id": "ETP_F_3_6",
+    "equation1": "x = x*x",
+    "equation2": "x = y*y",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [1, 1]]"
+    },
+    "source": "smallest_magma E3 falsifies E6"
+  },
+  {
+    "id": "ETP_F_4_7",
+    "equation1": "x = x*y",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 0], [1, 1]]"
+    },
+    "source": "smallest_magma E4 falsifies E7"
+  },
+  {
+    "id": "ETP_F_5_7",
+    "equation1": "x = y*x",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [0, 1]]"
+    },
+    "source": "smallest_magma E5 falsifies E7"
+  },
+  {
+    "id": "ETP_F_8_6",
+    "equation1": "x = x*(x*x)",
+    "equation2": "x = y*y",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 0], [0, 1]]"
+    },
+    "source": "smallest_magma E8 falsifies E6"
+  },
+  {
+    "id": "ETP_F_9_7",
+    "equation1": "x = x*(x*y)",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 0], [1, 1]]"
+    },
+    "source": "smallest_magma E9 falsifies E7"
+  },
+  {
+    "id": "ETP_F_10_7",
+    "equation1": "x = x*(y*x)",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [0, 1]]"
+    },
+    "source": "smallest_magma E10 falsifies E7"
+  },
+  {
+    "id": "ETP_F_11_5",
+    "equation1": "x = x*(y*y)",
+    "equation2": "x = y*x",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[1, 0], [1, 1]]"
+    },
+    "source": "smallest_magma E11 falsifies E5"
+  },
+  {
+    "id": "ETP_F_12_7",
+    "equation1": "x = x*(y*z)",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 0], [1, 1]]"
+    },
+    "source": "smallest_magma E12 falsifies E7"
+  },
+  {
+    "id": "ETP_F_13_7",
+    "equation1": "x = y*(x*x)",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [0, 1]]"
+    },
+    "source": "smallest_magma E13 falsifies E7"
+  },
+  {
+    "id": "ETP_F_14_5",
+    "equation1": "x = y*(x*y)",
+    "equation2": "x = y*x",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [1, 0]]"
+    },
+    "source": "smallest_magma E14 falsifies E5"
+  },
+  {
+    "id": "ETP_F_16_7",
+    "equation1": "x = y*(y*x)",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [0, 1]]"
+    },
+    "source": "smallest_magma E16 falsifies E7"
+  },
+  {
+    "id": "ETP_F_19_7",
+    "equation1": "x = y*(z*x)",
+    "equation2": "x = y*z",
+    "verdict": "false",
+    "witness": {
+      "size": 2,
+      "table": "[[0, 1], [0, 1]]"
+    },
+    "source": "smallest_magma E19 falsifies E7"
+  }
+]

@@ -21,6 +21,7 @@ import sys
 from typing import IO, Optional
 
 from .entries import Entry
+from .false_cert import render_false_cert, search_counterexample
 from .lean_export import render_sair_submission
 from .solver import VerificationResult, verify_derivation
 from .term import ParseError, parse_equation
@@ -111,6 +112,34 @@ def _summarize_judge_failure(status: str, stderr: str) -> str:
     return f"Lean judge returned {status}: {stderr[:500]}"
 
 
+# SAIR readme §Constraints: tokens that, if present, map to incomplete_proof.
+# Substring match — false positives just trigger a retry; missed tokens cost a
+# real submission attempt, so be conservative.
+BANNED_TOKENS = (
+    "sorry", "admit", "sorryAx", "dbg_trace", "dbgTrace",
+    "run_tac", "mkSorry", "initialize", "builtin_initialize",
+)
+
+
+def _code_is_clean(code: str, verdict: str) -> Optional[str]:
+    """Return None if the code may be sent to the judge, else a human reason.
+
+    Caps come straight from the SAIR readme §Constraints table:
+    100,000 characters for the true-cert `code` field, 20,000 bytes for the
+    false-cert one.
+    """
+    if verdict == "false":
+        if len(code.encode("utf-8")) > 20_000:
+            return "false-cert code exceeds the 20,000-byte cap"
+    else:
+        if len(code) > 100_000:
+            return "true-cert code exceeds the 100,000-character cap"
+    for tok in BANNED_TOKENS:
+        if tok in code:
+            return f"banned token in code: {tok!r}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -120,6 +149,7 @@ def main(
     *,
     stdin: Optional[IO[str]] = None,
     stdout: Optional[IO[str]] = None,
+    max_size: int = 3,
 ) -> int:
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
@@ -136,6 +166,29 @@ def main(
         return 1
 
     last_summary = ""
+
+    # Cheap pre-flight: a brute-force counterexample search on small Fin n.
+    # Costs no LLM tokens.  If found, submit verdict="false" directly; on
+    # rejection, fall through to the LLM loop with a summary.
+    witness = search_counterexample(from_eq, to_eq, max_size=max_size)
+    if witness is not None:
+        n, table = witness
+        code = render_false_cert(n, table)
+        reason = _code_is_clean(code, "false")
+        if reason is None:
+            _send(stdout, {"call": "judge", "verdict": "false", "code": code})
+            judge_resp = _read(stdin)
+            if judge_resp is None:
+                return 1
+            if judge_resp.get("status") == "accepted":
+                return 0
+            last_summary = _summarize_judge_failure(
+                judge_resp.get("status", "unknown"),
+                judge_resp.get("stderr", ""),
+            )
+        else:
+            last_summary = f"Skipped false-cert: {reason}"
+
     round_num = 0
 
     while True:
@@ -174,6 +227,11 @@ def main(
             code = render_sair_submission(entries, 0, 1)
         except Exception as exc:  # ImplicationChainError or other render error
             last_summary = f"Lean rendering failed: {exc}"
+            continue
+
+        reason = _code_is_clean(code, "true")
+        if reason is not None:
+            last_summary = f"Skipped judge call: {reason}"
             continue
 
         _send(stdout, {"call": "judge", "verdict": "true", "code": code})

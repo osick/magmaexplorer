@@ -222,7 +222,9 @@ def test_proof_body_trans_handles_orientation():
     assert ".trans" in text
 
 
-def test_proof_body_rewrite_uses_rw_tactic():
+def test_proof_body_rewrite_uses_nth_rewrite_tactic():
+    # Step 5b — DSL `rewrite` is leftmost-outermost, matching Lean's
+    # `nth_rewrite 1` (Mathlib). Plain `rw` would rewrite ALL occurrences.
     entries = [
         _axiom("a*x = x*a"),
         _axiom("x = b"),
@@ -230,8 +232,34 @@ def test_proof_body_rewrite_uses_rw_tactic():
     ]
     body = proof_body(entries[2], entries, goal_vars=["a", "b", "x"])
     text = "\n".join(body)
-    assert "rw [eq_1] at" in text
+    assert "nth_rewrite 1 [eq_1] at" in text
     assert "exact" in text
+    # The old `rw [eq_1]` form must be gone, and so must the old NOTE comment
+    # that warned the reader the tactic was wrong.
+    assert "rw [eq_1]" not in text
+    assert "NOTE: `rw` rewrites ALL occurrences" not in text
+
+
+def test_sair_submission_preamble_imports_nth_rewrite():
+    # render_sair_submission must include the Mathlib import that
+    # provides `nth_rewrite`, so the rewrite path compiles.
+    entries = [
+        _axiom("a*x = x*a"),
+        _axiom("x = b"),
+        _derived("a*b = x*a", [0, 1], "rewrite [0] using [1]"),
+    ]
+    # Single-axiom + intermediate chain isn't valid for render_sair_submission
+    # (it requires a single hypothesis); use a synthetic two-entry chain.
+    from magmaexplorer.entries import Entry
+    from magmaexplorer.term import parse_equation
+    eq1 = parse_equation("x*y = y*x")
+    eq2 = parse_equation("b*a = a*b")
+    entries2 = [
+        Entry(content=eq1, sources=[], steps=[]),
+        Entry(content=eq2, sources=[0], steps=["inst [0] x:=a, y:=b", "sym s1"]),
+    ]
+    code = render_sair_submission(entries2, 0, 1)
+    assert "import Mathlib.Tactic.NthRewrite" in code
 
 
 # ---------------------------------------------------------------------------

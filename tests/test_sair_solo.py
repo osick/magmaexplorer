@@ -238,3 +238,233 @@ class TestEmittedCodeShape:
         sair_solo.main(stdin=stdin, stdout=stdout)
         sent = _parse_stdout(stdout)
         assert "sorry" not in sent[1]["code"]
+
+
+# ---------------------------------------------------------------------------
+# Emission guards — banned tokens + code size cap
+#
+# SAIR readme §Constraints:
+#   Banned tokens: sorry, admit, sorryAx, dbg_trace, dbgTrace,
+#                  run_tac, mkSorry, initialize, builtin_initialize
+#   Max code length: 100,000 characters (true cert)
+#   Max false certificate code: 20,000 bytes
+#
+# If the renderer hands us code that violates either, we MUST NOT send the
+# judge call (it would map to incomplete_proof / malformed). Loop with a
+# `last_attempt_summary` instead.
+# ---------------------------------------------------------------------------
+
+
+import pytest
+
+
+class TestEmissionGuards:
+    @pytest.mark.parametrize(
+        "banned_token",
+        ["sorry", "admit", "sorryAx", "dbg_trace", "dbgTrace",
+         "run_tac", "mkSorry", "initialize", "builtin_initialize"],
+    )
+    def test_banned_token_in_code_skips_judge_call(self, monkeypatch, banned_token):
+        # Force render to inject a banned token into otherwise-valid Lean.
+        bad_code = (
+            f"import JudgeProblem\n\ndef submission : Goal := by\n  {banned_token}\n"
+        )
+        monkeypatch.setattr(sair_solo, "render_sair_submission",
+                            lambda *a, **kw: bad_code)
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["inst [0] x:=b, y:=a"]),
+            # No further proxy responses — stdin closes after the retry's llm call.
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout)
+
+        sent = _parse_stdout(stdout)
+        # Expected sequence: llm (round 0), llm (round 1, retry); no judge call.
+        assert [m["call"] for m in sent] == ["llm", "llm"], (
+            f"banned token {banned_token!r} should suppress the judge call"
+        )
+        assert rc == 1  # exited because stdin closed before judge call
+        # Retry summary mentions the violation.
+        summary = sent[1]["context"]["last_attempt_summary"]
+        assert "banned" in summary.lower() or banned_token in summary
+
+    def test_oversized_true_cert_skips_judge_call(self, monkeypatch):
+        # 200 KB of valid-looking Lean — over the 100,000-char limit.
+        oversized = "import JudgeProblem\n" + ("-- pad line\n" * 18000)
+        assert len(oversized) > 100_000
+        monkeypatch.setattr(sair_solo, "render_sair_submission",
+                            lambda *a, **kw: oversized)
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["inst [0] x:=b, y:=a"]),
+        )
+        stdout = io.StringIO()
+        sair_solo.main(stdin=stdin, stdout=stdout)
+
+        sent = _parse_stdout(stdout)
+        assert [m["call"] for m in sent] == ["llm", "llm"]
+        summary = sent[1]["context"]["last_attempt_summary"]
+        assert "cap" in summary.lower() or "exceed" in summary.lower() or "too large" in summary.lower()
+
+    def test_clean_code_still_passes_through(self):
+        # Sanity: with no monkeypatching, the existing happy path still works.
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["inst [0] x:=b, y:=a"]),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        assert [m["call"] for m in sent] == ["llm", "judge"]
+
+
+# ---------------------------------------------------------------------------
+# Verdict dispatch — Step 4
+#
+# Before invoking the LLM, the solver runs a brute-force counterexample
+# search.  If a witness exists at small Fin n, submit verdict="false"
+# directly; otherwise fall through to the existing LLM-driven true-cert
+# loop.  Spec: competition.md §"Core Task" — both directions need certs.
+# ---------------------------------------------------------------------------
+
+
+def _false_implication_start() -> dict:
+    """Start message for a pair that does NOT imply (commutativity → idempotence).
+
+    Witness: any non-idempotent commutative magma on Fin 2 (e.g. [[0,0],[0,0]])."""
+    return {
+        "problem": {
+            "id": "false_test",
+            "eq1_id": 43,
+            "eq2_id": 3,
+            "equation1": "x*y = y*x",
+            "equation2": "x*x = x",
+        },
+        "budget": {"timeout_seconds": 3600, "max_code_length": 100000},
+    }
+
+
+class TestVerdictDispatch:
+    def test_false_implication_submits_false_cert_without_llm_call(self):
+        stdin = _proxy_script(
+            _false_implication_start(),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        # Exactly one judge call, no LLM call.
+        assert [m["call"] for m in sent] == ["judge"]
+        assert sent[0]["verdict"] == "false"
+        assert "finOpTable" in sent[0]["code"]
+        assert "decideFin!" in sent[0]["code"]
+
+    def test_true_implication_still_uses_llm_loop(self):
+        # The existing happy path: x*y=y*x → b*a=a*b (true, no counterexample).
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["inst [0] x:=b, y:=a"]),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        assert [m["call"] for m in sent] == ["llm", "judge"]
+        assert sent[1]["verdict"] == "true"
+
+    def test_false_cert_rejection_falls_back_to_llm_loop(self):
+        # Judge rejects the false cert — solver should still emit an LLM
+        # call as a fallback (the LLM might find a different angle).
+        stdin = _proxy_script(
+            _false_implication_start(),
+            {"status": "incorrect", "stderr": "synthetic failure"},
+            # Stdin closes — solver exits 1 after the fallback LLM call.
+        )
+        stdout = io.StringIO()
+        sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        sent = _parse_stdout(stdout)
+        # Sequence: judge(false) → llm(fallback).
+        assert sent[0]["call"] == "judge" and sent[0]["verdict"] == "false"
+        assert sent[1]["call"] == "llm"
+        # Fallback summary should mention the rejection.
+        summary = sent[1]["context"]["last_attempt_summary"]
+        assert "incorrect" in summary or "judge" in summary.lower()
+
+    def test_search_skipped_when_max_size_is_one(self):
+        # max_size=1 disables the search (Fin 1 is trivial). The solver
+        # should skip the false-cert path entirely and go straight to LLM.
+        stdin = _proxy_script(
+            _false_implication_start(),
+            _llm_reply(["inst [0] x:=b, y:=a"]),  # will fail to reach goal, but loop continues
+            # Stdin closes — solver exits.
+        )
+        stdout = io.StringIO()
+        sair_solo.main(stdin=stdin, stdout=stdout, max_size=1)
+        sent = _parse_stdout(stdout)
+        # First message must be LLM, not judge.
+        assert sent[0]["call"] == "llm"
+
+
+# ---------------------------------------------------------------------------
+# Step 5a — ban `expand` / `fold` DSL primitives in the LLM reply.
+#
+# `lean_export.proof_body` emits `sorry` for these (they reference DSL
+# definitions that have no direct Lean counterpart). `sorry` is on the
+# SAIR banned-token list → would always be rejected by the judge. Reject
+# the LLM reply at the solver layer so the LLM gets a chance to rewrite
+# its derivation without these primitives.
+# ---------------------------------------------------------------------------
+
+
+class TestExpandFoldBan:
+    def test_expand_in_steps_triggers_retry(self):
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["expand s1 using d_1"]),     # would render to sorry
+            _llm_reply(["inst [0] x:=b, y:=a"]),     # clean fallback
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        # No judge call after the banned step.
+        assert [m["call"] for m in sent] == ["llm", "llm", "judge"]
+        # Round-1 carries an explanation that mentions the banned primitive.
+        summary = sent[1]["context"]["last_attempt_summary"]
+        assert "expand" in summary.lower()
+
+    def test_fold_in_steps_triggers_retry(self):
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["fold s1 using d_2"]),
+            _llm_reply(["inst [0] x:=b, y:=a"]),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        assert [m["call"] for m in sent] == ["llm", "llm", "judge"]
+        summary = sent[1]["context"]["last_attempt_summary"]
+        assert "fold" in summary.lower()
+
+    def test_mixed_clean_and_banned_steps_still_triggers_retry(self):
+        # If ANY step uses expand/fold, reject the whole reply (don't try
+        # to verify and let the bad step blow up downstream).
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["inst [0] x:=b, y:=a", "expand s1 using d_1"]),
+            _llm_reply(["inst [0] x:=b, y:=a"]),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        assert [m["call"] for m in sent] == ["llm", "llm", "judge"]
