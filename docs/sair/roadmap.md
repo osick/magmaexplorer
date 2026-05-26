@@ -25,10 +25,10 @@ Specs referenced:
 | **Step 3 — Brute-force false-cert search + render** | ✅ done — `false_cert.py`, 23 tests (12 dataset-driven) |
 | **Step 4 — Verdict-decision dispatch** | ✅ done — false-cert search runs before LLM loop, 4 dispatch tests |
 | **Step 5 — Lean translation gaps** | ✅ done — 5a already-implicit (DSL parser blocks `d_N` refs); 5b: `rw` → `nth_rewrite 1`, Mathlib import wired in |
-| **Step 6 — Wall-clock pacing** | ❌ not yet |
+| **Step 6 — Wall-clock pacing** | ✅ done — `_now` + deadline check (100s slack), 3 pacing tests |
 | **Step 7 — Single-file solver.py packaging** | ❌ not yet |
 
-430 tests passing (+46 Step 1, +11 Step 2, +23 Step 3, +4 Step 4, +3 Step 5a regression + 1 Step 5b Mathlib-import).
+433 tests passing (+46 Step 1, +11 Step 2, +23 Step 3, +4 Step 4, +4 Step 5, +3 Step 6).
 
 ---
 

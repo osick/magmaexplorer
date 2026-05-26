@@ -468,3 +468,68 @@ class TestExpandFoldBan:
         assert rc == 0
         sent = _parse_stdout(stdout)
         assert [m["call"] for m in sent] == ["llm", "llm", "judge"]
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — Wall-clock pacing.
+#
+# SAIR readme §Solver Budgets: "Wall-clock timeout 3600s … pacing LLM/judge
+# calls within this is the solver's responsibility." The proxy SIGTERMs us
+# at the deadline; we should exit cleanly before that so we don't strand a
+# half-sent message.
+# ---------------------------------------------------------------------------
+
+
+class TestWallClockPacing:
+    def test_aborts_when_deadline_passed_before_llm_call(self, monkeypatch):
+        # `_now` is the module-level alias for time.monotonic.  Make every
+        # call jump 10_000 seconds forward — first call sets start_time, the
+        # very next call (the deadline check in the loop) exceeds the budget.
+        clock = [0.0]
+        def fake_now():
+            clock[0] += 10_000
+            return clock[0]
+        monkeypatch.setattr(sair_solo, "_now", fake_now)
+
+        # True implication — false-cert search returns None, falls through
+        # to the LLM loop where the deadline check trips.
+        stdin = _proxy_script(_start())
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 1
+        sent = _parse_stdout(stdout)
+        # No LLM call emitted — the deadline tripped first.
+        assert all(m["call"] != "llm" for m in sent)
+
+    def test_normal_flow_still_runs_under_real_clock(self):
+        # Sanity: tests run in ms, way under the 3600s budget — nothing trips.
+        stdin = _proxy_script(
+            _start(),
+            _llm_reply(["inst [0] x:=a, y:=b", "sym s1"]),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0
+        sent = _parse_stdout(stdout)
+        assert [m["call"] for m in sent] == ["llm", "judge"]
+
+    def test_short_budget_still_allows_one_round(self, monkeypatch):
+        # Budget so tiny the slack would push the deadline into the past.
+        # `max(timeout_s - SLACK, 60)` floor must keep the deadline livable
+        # so a single round can complete in a normal test run.
+        start_msg = {
+            "problem": {
+                "id": "tiny", "eq1_id": 0, "eq2_id": 1,
+                "equation1": "x*y = y*x", "equation2": "b*a = a*b",
+            },
+            "budget": {"timeout_seconds": 30, "max_code_length": 100000},
+        }
+        stdin = _proxy_script(
+            start_msg,
+            _llm_reply(["inst [0] x:=a, y:=b", "sym s1"]),
+            {"status": "accepted"},
+        )
+        stdout = io.StringIO()
+        rc = sair_solo.main(stdin=stdin, stdout=stdout, max_size=2)
+        assert rc == 0

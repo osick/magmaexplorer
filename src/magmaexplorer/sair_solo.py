@@ -18,7 +18,15 @@ import io
 import json
 import re
 import sys
+import time
 from typing import IO, Optional
+
+
+# Module-level alias so tests can monkeypatch the clock.
+_now = time.monotonic
+
+# Exit this many seconds before the proxy SIGTERMs us, to flush cleanly.
+WALL_CLOCK_SLACK_SECONDS = 100
 
 from .entries import Entry
 from .false_cert import render_false_cert, search_counterexample
@@ -165,6 +173,12 @@ def main(
     except (ParseError, KeyError):
         return 1
 
+    # Wall-clock pacing — exit cleanly before the proxy SIGTERMs us.
+    # `max(..., 60)` ensures the deadline is always at least 60s ahead even
+    # with absurdly tiny budgets, so a single round can still complete.
+    timeout_s = start.get("budget", {}).get("timeout_seconds", 3600)
+    deadline = _now() + max(timeout_s - WALL_CLOCK_SLACK_SECONDS, 60)
+
     last_summary = ""
 
     # Cheap pre-flight: a brute-force counterexample search on small Fin n.
@@ -192,6 +206,9 @@ def main(
     round_num = 0
 
     while True:
+        if _now() >= deadline:
+            return 1
+
         _send(stdout, {
             "call": "llm",
             "context": {
